@@ -39,7 +39,9 @@ impl KvStore {
     }
 
     pub fn set(&mut self, k: String, v: String) -> Result<()> {
-        let e = Entry::Set(k.clone(), v.clone());
+        let escape_k = snailquote::escape(&k).to_string();
+        let escape_v = snailquote::escape(&v).to_string();
+        let e = Entry::Set(escape_k, escape_v);
         let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
             
         self.file.write(&bincode).context(ErrorKind::IOError)?;
@@ -134,7 +136,9 @@ impl KvStore {
         match bincode::deserialize_from(reader)
             .context(ErrorKind::IOError)? {
                 Entry::Set(_, v) => {
-                    Ok(Some(v))
+                    let r = snailquote::unescape(&v)
+                        .context(ErrorKind::IOError)?;
+                    Ok(Some(r))
                 },
                 Entry::Remove(_) => {
                     Err(ErrorKind::LogError)?

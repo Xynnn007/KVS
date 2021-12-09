@@ -16,3 +16,4 @@ walkdir = "2.3.2"
 failure = { version = "0.1.8", features = [ "failure_derive" ]}
 serde = { version = "1.0.117", features = ["derive"]}
 bincode = "1.3.3"
+snailquote = "0.3.1"
