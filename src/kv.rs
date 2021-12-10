@@ -32,27 +32,35 @@ impl KvStore {
 
         file.seek(SeekFrom::End(0)).context(ErrorKind::IOError)?;
 
-        Ok(Self {
+        let mut r = Self {
             map : HashMap::new(),
             file,
-        })
+        };
+
+        r.init()?;
+        Ok(r)
     }
 
     pub fn set(&mut self, k: String, v: String) -> Result<()> {
         let escape_k = snailquote::escape(&k).to_string();
         let escape_v = snailquote::escape(&v).to_string();
-        let e = Entry::Set(escape_k, escape_v);
+        let e = Entry::Set(escape_k.clone(), escape_v);
         let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
-            
+
+        let offset = self.file.seek(SeekFrom::Current(0))
+            .context(ErrorKind::IOError)?;
+
         self.file.write(&bincode).context(ErrorKind::IOError)?;
         self.file.write("\n".as_bytes()).context(ErrorKind::IOError)?;
+
+        self.map.insert(escape_k, offset);
+
         Ok(())
     }
 
     pub fn get(&mut self, k: String) -> Result<Option<String>> {
-        self.update()?;
-
-        match self.map.get(&k) {
+        let escape_k = snailquote::escape(&k).to_string();
+        match self.map.get(&escape_k) {
             Some(t) => {
                 let index = t.clone();
                 self.get_from_file(index)
@@ -64,19 +72,18 @@ impl KvStore {
     }
 
     pub fn remove(&mut self, k: String) -> Result<()> {
-        self.update()?;
-
-        match self.map.get(&k) {
-            Some(_) => {},
-            None => {
-                Err(ErrorKind::NoEntryError)?
-            }
+        let escape_k = snailquote::escape(&k).to_string();
+        if !self.map.contains_key(&escape_k) {
+            Err(ErrorKind::NoEntryError)?
         }
 
-        let e = Entry::Remove(k);
+        let e = Entry::Remove(escape_k.clone());
         let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
             
         self.file.write(&bincode).context(ErrorKind::IOError)?;
+
+        self.map.remove(&escape_k);
+
         Ok(())
     }
 
@@ -92,14 +99,15 @@ impl KvStore {
                     .context(ErrorKind::IOError)?;
 
         file.seek(SeekFrom::End(0)).context(ErrorKind::IOError)?;
-        
-        Ok(Self {
+        let mut r = Self {
             file,
             map : HashMap::new(),
-        })
+        };
+        r.init()?;
+        Ok(r)
     }
 
-    fn update(&mut self) -> Result<()> {
+    fn init(&mut self) -> Result<()> {
         self.file.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
 
         let mut reader = BufReader::new(&mut self.file);
