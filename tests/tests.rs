@@ -48,6 +48,14 @@ fn cli_rm_non_existent_key() {
         .stdout(eq("key not found").trim());
 }
 
+// #[test]
+// fn set_once() -> Result<()> {
+//     let mut store = KvStore::new()?;
+//     let v = store.set("key1".to_string(), "value1".to_string()).unwrap();
+//     assert_eq!(v, ());
+//     Ok(())
+// }
+
 // `kvs set <KEY> <VALUE>` should print nothing and exit with zero.
 #[test]
 fn cli_set() {
@@ -61,13 +69,13 @@ fn cli_set() {
         .stdout(is_empty());
 }
 
-#[test]
-fn read_once() -> Result<()> {
-    let mut store = KvStore::new()?;
-    let v = store.get("key1".to_string()).unwrap().unwrap();
-    assert_eq!(v, "value1");
-    Ok(())
-}
+// #[test]
+// fn read_once() -> Result<()> {
+//     let mut store = KvStore::new()?;
+//     let v = store.get("key1".to_string()).unwrap().unwrap();
+//     assert_eq!(v, "value1");
+//     Ok(())
+// }
 
 #[test]
 fn cli_get_stored() -> Result<()> {

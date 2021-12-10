@@ -1,16 +1,15 @@
+use std::cmp::max;
 use std::env::current_dir;
 use std::{collections::HashMap, io::SeekFrom};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, self};
 use std::path::PathBuf;
-use std::io::{Write, Seek, BufReader, BufRead};
+use std::io::{Write, Seek, BufReader, BufRead, Read};
 
 use failure::ResultExt;
+use regex::Regex;
 use serde::{Serialize, Deserialize};
+
 use crate::err::*;
-pub struct KvStore {
-    map: HashMap<String, u64>,
-    file: File,
-}
 
 #[derive(Serialize, Deserialize)]
 enum Entry {
@@ -18,42 +17,141 @@ enum Entry {
     Remove(String),
 }
 
-const STORAGE : &str = "storage.bin";
+pub struct Position (String, u64);
+
+const MAX_SIZE : u64 = 1024;
+pub struct KvStore {
+    map: HashMap<String, Position>,
+    files: HashMap<String, File>,
+    workdir: PathBuf,
+    file:String,
+    index: u64,
+}
+
 
 impl KvStore {
     pub fn new() -> Result<Self> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .truncate(false)
-            .read(true)
-            .create(true)
-            .open(current_dir().unwrap().join(STORAGE))
-            .context(ErrorKind::IOError)?;
+        KvStore::open(current_dir().context(ErrorKind::IOError)?)
+    }
 
-        file.seek(SeekFrom::End(0)).context(ErrorKind::IOError)?;
+    pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
+        let file_path : PathBuf = path.into();
+        let (mut logs, mut clogs) = KvStore::get_log_numbers(file_path.clone())?;
+        clogs.reverse();
+        let mut compacted_log = None;
+        let mut compacted_log_index = None;
+        for clog in clogs.iter() {
+            let mut clog_file_path = file_path.clone();
+            clog_file_path.push(KvStore::get_compacted_log_name(*clog));
+            let mut file = OpenOptions::new()
+                    .truncate(false)
+                    .read(true)
+                    .open(clog_file_path)
+                    .context(ErrorKind::IOError)?;
+            if legel_compacted_log(&mut file)? {
+                compacted_log = Some(file);
+                compacted_log_index = Some(*clog);
+                break;
+            }
+        }
 
-        let mut r = Self {
-            map : HashMap::new(),
-            file,
-        };
+        logs.sort_unstable();
 
-        r.init()?;
-        Ok(r)
+        let last_log_index = logs.last();
+        let last_clog_index = clogs.last();
+        let index : u64;
+        match last_clog_index {
+            Some(i) => {
+                match last_log_index {
+                    Some(j) => {
+                        index = max(i, j) + 1;
+                    },
+                    None => {
+                        index = i + 1;
+                    }
+                }
+            },
+            None => {
+                match last_log_index {
+                    Some(j) => {
+                        index = j + 1;
+                    },
+                    None => {
+                        index = 1;
+                    }
+                }
+            }
+        }
+        
+        let mut files = HashMap::new();
+        let mut map = HashMap::new();
+
+        match compacted_log_index {
+            None => {
+                for it in logs.iter() {
+                    let mut log_file = file_path.clone();
+                    log_file.push(KvStore::get_log_name(*it));
+                    let mut file = OpenOptions::new()
+                                .truncate(false)
+                                .read(true)
+                                .open(log_file)
+                                .context(ErrorKind::IOError)?;
+                    KvStore::init_memory_a_file(&mut map, &KvStore::get_log_name(*it)[..], &mut file)?;
+                    files.insert(KvStore::get_log_name(*it), file);
+                } 
+            },
+            Some(compacted_log_index) => {
+                let compacted_log_name = KvStore::get_compacted_log_name(compacted_log_index);
+                let mut compacted_log_file = compacted_log.unwrap();
+                KvStore::init_memory_a_file(&mut map,&compacted_log_name, &mut compacted_log_file)?;
+
+                files.insert(compacted_log_name, compacted_log_file);
+                for it in logs.iter() {
+                    if *it < compacted_log_index {
+                        continue
+                    }
+
+                    let mut log_file_path = file_path.clone();
+                    log_file_path.push(KvStore::get_log_name(*it));
+                    let mut log_file = OpenOptions::new()
+                                .write(true)
+                                .truncate(false)
+                                .read(true)
+                                .create(true)
+                                .open(log_file_path)
+                                .context(ErrorKind::IOError)?;
+                    KvStore::init_memory_a_file(&mut map, &KvStore::get_log_name(*it), &mut log_file)?;
+                    files.insert(KvStore::get_log_name(*it), log_file);
+                } 
+            }
+        } 
+        
+        let mut log_file = file_path.clone();
+        log_file.push(KvStore::get_log_name(index));
+        let file = OpenOptions::new()
+                    .write(true)
+                    .truncate(false)
+                    .read(true)
+                    .create(true)
+                    .open(current_dir().unwrap().join(log_file))
+                    .context(ErrorKind::IOError)?;
+        files.insert(KvStore::get_log_name(index), file);
+        Ok(Self {
+            map,
+            file: KvStore::get_log_name(index),
+            files,
+            workdir: file_path,
+            index,
+        })
     }
 
     pub fn set(&mut self, k: String, v: String) -> Result<()> {
-        let escape_k = snailquote::escape(&k).to_string();
-        let escape_v = snailquote::escape(&v).to_string();
-        let e = Entry::Set(escape_k.clone(), escape_v);
-        let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
-
-        let offset = self.file.seek(SeekFrom::Current(0))
-            .context(ErrorKind::IOError)?;
-
-        self.file.write(&bincode).context(ErrorKind::IOError)?;
-        self.file.write("\n".as_bytes()).context(ErrorKind::IOError)?;
-
-        self.map.insert(escape_k, offset);
+        self.write_entry(k, v)?;
+        
+        // if size overflowed
+        if self.file()?.seek(SeekFrom::End(0)).context(ErrorKind::IOError)? > MAX_SIZE {
+            self.compaction()?;
+        };
 
         Ok(())
     }
@@ -61,9 +159,8 @@ impl KvStore {
     pub fn get(&mut self, k: String) -> Result<Option<String>> {
         let escape_k = snailquote::escape(&k).to_string();
         match self.map.get(&escape_k) {
-            Some(t) => {
-                let index = t.clone();
-                self.get_from_file(index)
+            Some(pos) => {
+                self.get_from_file(pos)
             },
             None => {
                 Ok(None)
@@ -80,66 +177,22 @@ impl KvStore {
         let e = Entry::Remove(escape_k.clone());
         let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
             
-        self.file.write(&bincode).context(ErrorKind::IOError)?;
+        self.file()?.write(&bincode).context(ErrorKind::IOError)?;
 
         self.map.remove(&escape_k);
 
         Ok(())
     }
 
-    pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
-        let mut file_path : PathBuf = path.into();
-        file_path.push(STORAGE);
-        let mut file = OpenOptions::new()
-                    .write(true)
-                    .truncate(false)
-                    .read(true)
-                    .create(true)
-                    .open(current_dir().unwrap().join(file_path))
-                    .context(ErrorKind::IOError)?;
-
-        file.seek(SeekFrom::End(0)).context(ErrorKind::IOError)?;
-        let mut r = Self {
-            file,
-            map : HashMap::new(),
+    fn get_from_file(&self, pos: &Position) -> Result<Option<String>> {
+        let mut fd = match self.files.get(&pos.0) {
+            Some(d) => d,
+            None => Err(ErrorKind::LogError)?
         };
-        r.init()?;
-        Ok(r)
-    }
-
-    fn init(&mut self) -> Result<()> {
-        self.file.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
-
-        let mut reader = BufReader::new(&mut self.file);
-        let mut offset  = 0;
-
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line)
-                .context(ErrorKind::IOError)?;
-
-            if line.len() == 0 {
-                break;
-            }
-            match bincode::deserialize(line.as_bytes())
-                .context(ErrorKind::IOError)? {
-                Entry::Set(k1, _) => {
-                    self.map.insert(k1, offset);
-                },
-                Entry::Remove(k1) => {
-                    self.map.remove(&k1);
-                }
-            }
-            offset += line.len() as u64;
-        }
-
-        self.file.seek(SeekFrom::End(0)).context(ErrorKind::IOError)?;
-        Ok(())
-    }
-
-    fn get_from_file(&mut self, offset: u64) -> Result<Option<String>> {
-        let mut reader = BufReader::new(&self.file);
-        reader.seek(SeekFrom::Start(offset))
+        fd.seek(SeekFrom::Start(0))
+            .context(ErrorKind::IOError)?;
+        let mut reader = BufReader::new(fd);
+        reader.seek(SeekFrom::Start(pos.1))
             .context(ErrorKind::IOError)?;
         match bincode::deserialize_from(reader)
             .context(ErrorKind::IOError)? {
@@ -153,4 +206,198 @@ impl KvStore {
                 }
         }
     }
+
+    fn file(&mut self) -> Result<&mut File> {
+        match self.files.get_mut(&self.file) {
+            Some(f) => Ok(f),
+            None => Err(ErrorKind::IOError)?
+        }
+    }
+
+    // fn get_file_by_name(&mut self, name: &str) -> Result<&mut File> {
+    //     match 
+    // }
+
+    fn compaction(&mut self) -> Result<()> {
+        self.index += 1;
+        let mut compacted_log = self.open_new_compacted_log()?;
+        
+        let mut new_map = HashMap::new();
+        for (k,pos) in &self.map {
+            let v = match self.get_from_file(pos)? {
+                Some(s) => s,
+                None => Err(ErrorKind::NoEntryError)?,
+            };
+
+            let offset = write_entry_to_file(
+                Entry::Set(k.clone(), v), 
+                &mut compacted_log)?;
+            let new_pos = Position(
+                KvStore::get_compacted_log_name(self.index),
+                offset,
+            );
+            
+            new_map.insert(k.clone(), new_pos);
+        }
+        compacted_log.write("\r\n".as_bytes()).context(ErrorKind::IOError)?;
+
+        self.map = new_map;
+        self.files.insert(KvStore::get_compacted_log_name(self.index), compacted_log);
+
+        self.delete_old_logs()?;
+        self.index += 1;
+        self.open_new_log()?;
+        Ok(())
+    }
+
+    fn delete_old_logs(&mut self) -> Result<()> {
+        let (logs, clogs) = KvStore::get_log_numbers(self.workdir.clone())?;
+        for log in logs.iter() {
+            if *log < self.index {
+                let log_name = KvStore::get_log_name(*log);
+                self.files.remove(&log_name);
+                let mut log_path= self.workdir.clone();
+                log_path.push(log_name);
+                fs::remove_file(log_path)
+                    .context(ErrorKind::IOError)?;
+            }
+        }
+        for clog in clogs.iter() {
+            if *clog < self.index {
+                let clog_name = KvStore::get_compacted_log_name(*clog);
+                self.files.remove(&clog_name);
+                let mut clog_path= self.workdir.clone();
+                clog_path.push(clog_name);
+                fs::remove_file(clog_path)
+                    .context(ErrorKind::IOError)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn open_new_log(&mut self) -> Result<()> {
+        let mut file_path = self.workdir.clone();
+        file_path.push(KvStore::get_log_name(self.index));
+        let file = OpenOptions::new()
+                    .write(true)
+                    .truncate(false)
+                    .read(true)
+                    .create(true)
+                    .open(file_path)
+                    .context(ErrorKind::IOError)?;
+        self.files.insert(KvStore::get_log_name(self.index), file);
+        self.file = KvStore::get_log_name(self.index);
+        Ok(())
+    }
+
+    fn open_new_compacted_log(&mut self) -> Result<File> {
+        let mut file_path = self.workdir.clone();
+        let log_name = KvStore::get_compacted_log_name(self.index);
+        file_path.push(log_name);
+        Ok(OpenOptions::new()
+                    .write(true)
+                    .truncate(false)
+                    .read(true)
+                    .create(true)
+                    .open(file_path)
+                    .context(ErrorKind::IOError)?)
+    }
+
+    fn get_log_name(id: u64) -> String {
+        format!("log-{}.bin", id)
+    }
+
+    fn get_compacted_log_name(id: u64) -> String {
+        format!("compacted-log-{}.bin", id)
+    }
+
+    fn write_entry(&mut self, k: String, v: String) -> Result<()> {
+        let escape_k = snailquote::escape(&k).to_string();
+        let escape_v = snailquote::escape(&v).to_string();
+        let e = Entry::Set(escape_k.clone(), escape_v);
+        
+        let offset = write_entry_to_file(e, self.file()?)?;
+        self.map.insert(escape_k, Position(KvStore::get_log_name(self.index), offset));
+        Ok(())
+    }
+
+    fn init_memory_a_file(map: &mut HashMap<String, Position>, filename: &str, file: &mut File) -> Result<()> {
+        file.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
+
+        let mut reader = BufReader::new(file);
+        let mut offset  = 0;
+
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line)
+                .context(ErrorKind::IOError)?;
+
+            if line.is_empty() || line.ends_with("\r\n") {
+                break;
+            }
+
+            match bincode::deserialize(line.as_bytes())
+                .context(ErrorKind::IOError)? {
+                Entry::Set(k1, _) => {
+                    map.insert(k1, Position(filename[..].to_string(), offset));
+                },
+                Entry::Remove(k1) => {
+                    map.remove(&k1);
+                }
+            }
+            offset += line.len() as u64;
+        }
+
+        reader.seek(SeekFrom::End(0)).context(ErrorKind::IOError)?;
+        Ok(())
+    }
+
+    fn get_log_numbers(file_path: PathBuf) -> Result<(Vec<u64>,Vec<u64>)> {
+        let files = fs::read_dir(file_path).context(ErrorKind::IOError)?;
+        let mut logs = vec![];
+        let mut clogs = vec![];
+        let log_re: Regex = Regex::new(r"^log-(?P<n>\d+).bin$").unwrap();
+        let clog_re: Regex = Regex::new(r"^compacted-log-(?P<n>\d+).bin$").unwrap();
+        for entry in files {
+            let name = entry.context(ErrorKind::IOError)?
+                                .file_name();
+            let entry_name = name.to_str()
+                                .unwrap_or("");
+    
+            if log_re.is_match(entry_name) {
+                let index = log_re.replace(&entry_name, "$n")
+                    .parse::<u64>()
+                    .context(ErrorKind::IOError)?;
+                logs.push(index);
+            } else if clog_re.is_match(entry_name) {
+                let index = clog_re.replace(entry_name, "$n")
+                    .parse::<u64>()
+                    .context(ErrorKind::IOError)?;
+                clogs.push(index);
+            }
+        }
+        clogs.sort_unstable();
+        logs.sort_unstable();
+        Ok((logs, clogs))
+    }
+}
+
+fn legel_compacted_log(fd: &mut File) -> Result<bool> {
+    fd.seek(SeekFrom::End(-2)).context(ErrorKind::IOError)?;
+    let mut buf = [0, 0];
+    fd.read(&mut buf).context(ErrorKind::IOError)?;
+    Ok(buf == [0xd, 0xa])
+    // \r\n as end of compacted file
+}
+
+fn write_entry_to_file(e: Entry, fd: &mut File) -> Result<u64> {
+    let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
+        
+    let offset = fd.seek(SeekFrom::Current(0))
+        .context(ErrorKind::IOError)?;
+
+    fd.write(&bincode).context(ErrorKind::IOError)?;
+    fd.write("\n".as_bytes()).context(ErrorKind::IOError)?;
+
+    Ok(offset)
 }
