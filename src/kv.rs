@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::env::current_dir;
 use std::{collections::HashMap, io::SeekFrom};
 use std::fs::{File, OpenOptions, self};
@@ -6,7 +5,6 @@ use std::path::PathBuf;
 use std::io::{Write, Seek, BufReader, BufRead, Read};
 
 use failure::ResultExt;
-use regex::Regex;
 use serde::{Serialize, Deserialize};
 
 use crate::err::*;
@@ -59,29 +57,8 @@ impl KvStore {
 
         let last_log_index = logs.last();
         let last_clog_index = clogs.last();
-        let index : u64;
-        match last_clog_index {
-            Some(i) => {
-                match last_log_index {
-                    Some(j) => {
-                        index = max(i, j) + 1;
-                    },
-                    None => {
-                        index = i + 1;
-                    }
-                }
-            },
-            None => {
-                match last_log_index {
-                    Some(j) => {
-                        index = j + 1;
-                    },
-                    None => {
-                        index = 1;
-                    }
-                }
-            }
-        }
+        let index : u64 = last_log_index.unwrap_or(&0)
+            + last_clog_index.unwrap_or(&0) + 1;
         
         let mut files = HashMap::new();
         let mut map = HashMap::new();
@@ -304,11 +281,11 @@ impl KvStore {
     }
 
     fn get_log_name(id: u64) -> String {
-        format!("log-{}.bin", id)
+        format!("{}.log", id)
     }
 
     fn get_compacted_log_name(id: u64) -> String {
-        format!("compacted-log-{}.bin", id)
+        format!("{}.compacted", id)
     }
 
     fn write_entry(&mut self, k: String, v: String) -> Result<()> {
@@ -353,29 +330,32 @@ impl KvStore {
     }
 
     fn get_log_numbers(file_path: PathBuf) -> Result<(Vec<u64>,Vec<u64>)> {
-        let files = fs::read_dir(file_path).context(ErrorKind::IOError)?;
-        let mut logs = vec![];
-        let mut clogs = vec![];
-        let log_re: Regex = Regex::new(r"^log-(?P<n>\d+).bin$").unwrap();
-        let clog_re: Regex = Regex::new(r"^compacted-log-(?P<n>\d+).bin$").unwrap();
-        for entry in files {
-            let name = entry.context(ErrorKind::IOError)?
-                                .file_name();
-            let entry_name = name.to_str()
-                                .unwrap_or("");
-    
-            if log_re.is_match(entry_name) {
-                let index = log_re.replace(&entry_name, "$n")
-                    .parse::<u64>()
-                    .context(ErrorKind::IOError)?;
-                logs.push(index);
-            } else if clog_re.is_match(entry_name) {
-                let index = clog_re.replace(entry_name, "$n")
-                    .parse::<u64>()
-                    .context(ErrorKind::IOError)?;
-                clogs.push(index);
-            }
-        }
+        let mut clogs: Vec<u64> = fs::read_dir(file_path.clone()).context(ErrorKind::IOError)?
+            .flat_map(|f| -> Result<_> {Ok(f.context(ErrorKind::IOError)?.path())})
+            .filter(|f| {f.is_file()})
+            .filter(|f|f.extension() == Some("compacted".as_ref()))
+            .flat_map(|path| {
+                path.file_name()
+                    .and_then(|s|s.to_str())
+                    .map(|s| s.trim_end_matches(".compacted"))
+                    .map(|i| i.parse::<u64>())
+            })
+            .flatten()
+            .collect();
+        
+        let mut logs: Vec<u64> = fs::read_dir(file_path).context(ErrorKind::IOError)?
+            .flat_map(|f| -> Result<_> {Ok(f.context(ErrorKind::IOError)?.path())})
+            .filter(|f| {f.is_file()})
+            .filter(|f|f.extension() == Some("log".as_ref()))
+            .flat_map(|path| {
+                path.file_name()
+                    .and_then(|s|s.to_str())
+                    .map(|s| s.trim_end_matches(".log"))
+                    .map(|i| i.parse::<u64>())
+            })
+            .flatten()
+            .collect();
+
         clogs.sort_unstable();
         logs.sort_unstable();
         Ok((logs, clogs))
