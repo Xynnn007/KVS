@@ -15,7 +15,11 @@ enum Entry {
     Remove(String),
 }
 
-pub struct Position (String, u64);
+pub struct Position {
+    key: String, 
+    offset: u64,
+    size: u64
+}
 
 const MAX_SIZE : u64 = 1024;
 pub struct KvStore {
@@ -24,6 +28,7 @@ pub struct KvStore {
     workdir: PathBuf,
     file:String,
     index: u64,
+    compact_size: u64,
 }
 
 
@@ -119,6 +124,7 @@ impl KvStore {
             files,
             workdir: file_path,
             index,
+            compact_size: 0,
         })
     }
 
@@ -126,9 +132,9 @@ impl KvStore {
         self.write_entry(k, v)?;
         
         // if size overflowed
-        if self.file()?.seek(SeekFrom::End(0)).context(ErrorKind::IOError)? > MAX_SIZE {
+        if self.compact_size > MAX_SIZE {
             self.compaction()?;
-        };
+        }
 
         Ok(())
     }
@@ -162,14 +168,14 @@ impl KvStore {
     }
 
     fn get_from_file(&self, pos: &Position) -> Result<Option<String>> {
-        let mut fd = match self.files.get(&pos.0) {
+        let mut fd = match self.files.get(&pos.key) {
             Some(d) => d,
             None => Err(ErrorKind::LogError)?
         };
         fd.seek(SeekFrom::Start(0))
             .context(ErrorKind::IOError)?;
         let mut reader = BufReader::new(fd);
-        reader.seek(SeekFrom::Start(pos.1))
+        reader.seek(SeekFrom::Start(pos.offset))
             .context(ErrorKind::IOError)?;
         match bincode::deserialize_from(reader)
             .context(ErrorKind::IOError)? {
@@ -206,13 +212,16 @@ impl KvStore {
                 None => Err(ErrorKind::NoEntryError)?,
             };
 
-            let offset = write_entry_to_file(
-                Entry::Set(k.clone(), v), 
+            let bincode = bincode::serialize(&Entry::Set(k.clone(), v))
+                .context(ErrorKind::IOError)?;
+            let offset = write_entry_data_to_file(
+                &bincode, 
                 &mut compacted_log)?;
-            let new_pos = Position(
-                KvStore::get_compacted_log_name(self.index),
+            let new_pos = Position {
+                key: KvStore::get_compacted_log_name(self.index),
                 offset,
-            );
+                size: bincode.len() as u64 + 1
+            };
             
             new_map.insert(k.clone(), new_pos);
         }
@@ -224,6 +233,7 @@ impl KvStore {
         self.delete_old_logs()?;
         self.index += 1;
         self.open_new_log()?;
+        self.compact_size = 0;
         Ok(())
     }
 
@@ -293,8 +303,18 @@ impl KvStore {
         let escape_v = snailquote::escape(&v).to_string();
         let e = Entry::Set(escape_k.clone(), escape_v);
         
-        let offset = write_entry_to_file(e, self.file()?)?;
-        self.map.insert(escape_k, Position(KvStore::get_log_name(self.index), offset));
+        let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
+        
+        let offset = write_entry_data_to_file(&bincode, self.file()?)?;
+
+        if let Some(old_pos) = self.map.insert(escape_k, Position{
+            key: KvStore::get_log_name(self.index),
+            offset,
+            size: bincode.len() as u64 + 1,
+        }) {
+            self.compact_size += old_pos.size;
+        }
+        
         Ok(())
     }
 
@@ -316,7 +336,11 @@ impl KvStore {
             match bincode::deserialize(line.as_bytes())
                 .context(ErrorKind::IOError)? {
                 Entry::Set(k1, _) => {
-                    map.insert(k1, Position(filename[..].to_string(), offset));
+                    map.insert(k1, Position {
+                        key: filename[..].to_string(), 
+                        offset,
+                        size: line.len() as u64,
+                    });
                 },
                 Entry::Remove(k1) => {
                     map.remove(&k1);
@@ -370,9 +394,7 @@ fn legel_compacted_log(fd: &mut File) -> Result<bool> {
     // \r\n as end of compacted file
 }
 
-fn write_entry_to_file(e: Entry, fd: &mut File) -> Result<u64> {
-    let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
-        
+fn write_entry_data_to_file(bincode: &Vec<u8>, fd: &mut File) -> Result<u64> {
     let offset = fd.seek(SeekFrom::Current(0))
         .context(ErrorKind::IOError)?;
 
