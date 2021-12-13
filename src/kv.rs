@@ -378,6 +378,6 @@ fn write_entry_to_file(e: Entry, fd: &mut File) -> Result<u64> {
 
     fd.write(&bincode).context(ErrorKind::IOError)?;
     fd.write("\n".as_bytes()).context(ErrorKind::IOError)?;
-
+    fd.flush().context(ErrorKind::IOError)?;
     Ok(offset)
 }
