@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::env::current_dir;
-use std::{collections::HashMap, io::SeekFrom};
+use std::io::SeekFrom;
 use std::fs::{File, OpenOptions, self};
 use std::path::PathBuf;
-use std::io::{Write, Seek, BufReader, BufRead, Read};
+use std::io::{Write, Seek, BufReader, BufRead, Read, self};
 
 use failure::ResultExt;
 use serde::{Serialize, Deserialize};
@@ -207,23 +208,25 @@ impl KvStore {
         
         let mut new_map = HashMap::new();
         for (k,pos) in &self.map {
-            let v = match self.get_from_file(pos)? {
-                Some(s) => s,
-                None => Err(ErrorKind::NoEntryError)?,
-            };
+            if let Some(file) = self.files.get_mut(&pos.key) {
+                file.seek(SeekFrom::Start(pos.offset))
+                    .context(ErrorKind::IOError)?;
+                let mut reader = io::BufReader::new(file.take(pos.size));
+                let offset = compacted_log.seek(SeekFrom::Current(0))
+                    .context(ErrorKind::IOError)?;
+                io::copy(&mut reader, &mut compacted_log)
+                    .context(ErrorKind::IOError)?;
 
-            let bincode = bincode::serialize(&Entry::Set(k.clone(), v))
-                .context(ErrorKind::IOError)?;
-            let offset = write_entry_data_to_file(
-                &bincode, 
-                &mut compacted_log)?;
-            let new_pos = Position {
-                key: KvStore::get_compacted_log_name(self.index),
-                offset,
-                size: bincode.len() as u64 + 1
-            };
+                let new_pos = Position {
+                    key: KvStore::get_compacted_log_name(self.index),
+                    offset,
+                    size: pos.size
+                };
             
-            new_map.insert(k.clone(), new_pos);
+                new_map.insert(k.clone(), new_pos);
+                file.seek(SeekFrom::End(0))
+                    .context(ErrorKind::IOError)?;
+            }
         }
         compacted_log.write("\r\n".as_bytes()).context(ErrorKind::IOError)?;
 
