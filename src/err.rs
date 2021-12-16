@@ -1,6 +1,8 @@
 use failure::*;
 use std::fmt;
 
+use serde::{Serialize, Deserialize};
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -8,7 +10,7 @@ pub struct Error {
     inner: Context<ErrorKind>,
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Fail)]
+#[derive(Copy, Clone, Debug, Fail, Serialize, Deserialize)]
 pub enum ErrorKind {
     #[fail(display = "I/O error")]
     IOError,
@@ -20,13 +22,19 @@ pub enum ErrorKind {
     ParameterError,
     #[fail(display = "Invalid log error")]
     LogError,
+    #[fail(display = "Network error")]
+    NetworkError,
+    #[fail(display = "Serialize error")]
+    SerializeError,
+    #[fail(display = "Operation error")]
+    OperationError,
+    #[fail(display = "Sled error")]
+    SledError,
+    #[fail(display = "Utf8 encode/decode error")]
+    Utf8Error,
+    #[fail(display = "Engine error")]
+    EngineError,
 }
-
-// impl std::fmt::Debug for Error {
-//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-//         fmt::Display::fmt(&self.inner.get_context(), f)
-//     }
-// }
 
 impl Fail for Error {
     fn cause(&self) -> Option<&dyn Fail> {

@@ -8,6 +8,7 @@ use std::io::{Write, Seek, BufReader, BufRead, Read, self};
 use failure::ResultExt;
 use serde::{Serialize, Deserialize};
 
+use crate::engine::KvsEngine;
 use crate::err::*;
 
 #[derive(Serialize, Deserialize)]
@@ -16,7 +17,7 @@ enum Entry {
     Remove(String),
 }
 
-pub struct Position {
+struct Position {
     log_no: u64, 
     offset: u64,
     size: u64
@@ -32,6 +33,50 @@ pub struct KvStore {
     compact_size: u64,
 }
 
+impl KvsEngine for KvStore {
+    fn set(&mut self, k: String, v: String) -> Result<()> {
+        self.write_entry(k, v)?;
+        
+        // if size overflowed
+        if self.compact_size > MAX_SIZE {
+            self.compact()?;
+        }
+
+        Ok(())
+    }
+
+    fn get(&mut self, k: String) -> Result<Option<String>> {
+        let escape_k = snailquote::escape(&k).to_string();
+        match self.map.get(&escape_k) {
+            Some(pos) => {
+                self.get_from_file(pos)
+            },
+            None => {
+                Ok(None)
+            }
+        }
+    }
+
+    fn remove(&mut self, k: String) -> Result<()> {
+        let escape_k = snailquote::escape(&k).to_string();
+        if !self.map.contains_key(&escape_k) {
+            Err(ErrorKind::NoEntryError)?
+        }
+
+        let e = Entry::Remove(escape_k.clone());
+        let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
+            
+        self.writer.write(&bincode).context(ErrorKind::IOError)?;
+
+        self.map.remove(&escape_k);
+
+        Ok(())
+    }
+
+    fn name(&mut self) -> String {
+        "KvStore".to_string()
+    }
+}
 
 impl KvStore {
     pub fn new() -> Result<Self> {
@@ -79,45 +124,6 @@ impl KvStore {
             index,
             compact_size: 0,
         })
-    }
-
-    pub fn set(&mut self, k: String, v: String) -> Result<()> {
-        self.write_entry(k, v)?;
-        
-        // if size overflowed
-        if self.compact_size > MAX_SIZE {
-            self.compact()?;
-        }
-
-        Ok(())
-    }
-
-    pub fn get(&mut self, k: String) -> Result<Option<String>> {
-        let escape_k = snailquote::escape(&k).to_string();
-        match self.map.get(&escape_k) {
-            Some(pos) => {
-                self.get_from_file(pos)
-            },
-            None => {
-                Ok(None)
-            }
-        }
-    }
-
-    pub fn remove(&mut self, k: String) -> Result<()> {
-        let escape_k = snailquote::escape(&k).to_string();
-        if !self.map.contains_key(&escape_k) {
-            Err(ErrorKind::NoEntryError)?
-        }
-
-        let e = Entry::Remove(escape_k.clone());
-        let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
-            
-        self.writer.write(&bincode).context(ErrorKind::IOError)?;
-
-        self.map.remove(&escape_k);
-
-        Ok(())
     }
 
     fn get_from_file(&self, pos: &Position) -> Result<Option<String>> {
