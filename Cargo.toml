@@ -23,3 +23,10 @@ log = "0.4.14"
 stderrlog = "0.5.1"
 serde_json = "1.0.73"
 sled = "0.34.7"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "kvstore"
+harness = false
