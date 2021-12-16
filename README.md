@@ -6,18 +6,14 @@ follow the course [talent-plan](https://github.com/pingcap/talent-plan).
 
 ## Usage
 
-```bash
-cargo run set key1 value1
+Well, please refer to [talent-plan](https://github.com/pingcap/talent-plan) for more
+information.
 
-cargo run get key1
-```
+- [x] Project 1
+- [x] Project 2
+- [x] Project 3
+- [] Project 4
+- [] Project 5
 
-will get value1
-
-```bash
-cargo run rm key1
-
-cargo run get key1
-```
-
-Will failed because key `key1` has been removed.
+Well, the performance is so poor up to now, due to 
+complex disk i/o.
