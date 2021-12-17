@@ -1,8 +1,5 @@
 use crate::err::*;
 
-pub mod kv;
-pub mod sled;
-
 pub trait KvsEngine {
     fn set(&mut self, key: String, value: String) -> Result<()>;
 
@@ -12,3 +9,8 @@ pub trait KvsEngine {
 
     fn name(&mut self) -> String;
 }
+
+mod kv;
+mod sled;
+pub use self::kv::KvStore;
+pub use self::sled::SledKvsEngine;

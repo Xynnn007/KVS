@@ -1,10 +1,8 @@
 use failure::ResultExt;
 
-use crate::KvStore;
-use crate::engine::KvsEngine;
+use crate::engine::*;
 use crate::err::*;
 use crate::protocol::*;
-use crate::sled::SledKvsEngine;
 
 use std::fs;
 use std::io::Write;

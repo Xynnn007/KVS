@@ -1,7 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use kvs::KvStore;
-use kvs::KvsEngine;
-use kvs::sled::SledKvsEngine;
+use kvs::engine::*;
 use rand::Rng;
 use rand::thread_rng;
 use rand::distributions::Alphanumeric;
