@@ -1,6 +1,6 @@
 use std::collections::{HashMap, BTreeMap};
 use std::env::current_dir;
-use std::io::{SeekFrom, Write};
+use std::io::{SeekFrom, Write, BufWriter};
 use std::fs::{File, OpenOptions, self};
 use std::path::PathBuf;
 use std::io::{Seek, BufReader, Read, self};
@@ -26,9 +26,9 @@ struct Position {
 const MAX_SIZE : u64 = 1024 * 1024;
 pub struct KvStore {
     map: BTreeMap<String, Position>,
-    files: HashMap<u64, File>,
+    readers: HashMap<u64, ReadSeeker<File>>,
     workdir: PathBuf,
-    writer: File,
+    writer: WriteSeeker<File>,
     index: u64,
     compact_size: u64,
 }
@@ -36,13 +36,12 @@ pub struct KvStore {
 impl KvsEngine for KvStore {
     fn set(&mut self, k: String, v: String) -> Result<()> {
         let e = Entry::Set(k.clone(), v);
-        let offset = self.writer.seek(SeekFrom::Current(0))
-            .context(ErrorKind::IOError)?;
+        let offset = self.writer.pos as u64;
         serde_json::to_writer(&mut self.writer, &e).context(ErrorKind::IOError)?;
-        let end = self.writer.seek(SeekFrom::Current(0))
-            .context(ErrorKind::IOError)?;
         self.writer.flush()
             .context(ErrorKind::IOError)?;
+        let end = self.writer.pos as u64;
+          
         if let Some(old_pos) = self.map.insert(k, Position{
             log_no: self.index,
             offset,
@@ -61,10 +60,10 @@ impl KvsEngine for KvStore {
 
     fn get(&mut self, k: String) -> Result<Option<String>> {
        if let Some(pos) = self.map.get(&k) {
-                let fd = self.files.get_mut(&pos.log_no).ok_or(ErrorKind::IOError)?;
-                fd.seek(SeekFrom::Start(pos.offset))
+                let reader = self.readers.get_mut(&pos.log_no).ok_or(ErrorKind::IOError)?;
+                reader.seek(SeekFrom::Start(pos.offset))
                     .context(ErrorKind::IOError)?;
-                let reader = fd.take(pos.size);
+                let reader = reader.take(pos.size);
                 if let Entry::Set(.., value) = serde_json::from_reader(reader).context(ErrorKind::IOError)? { 
                     Ok(Some(value))
                 } else {
@@ -83,7 +82,9 @@ impl KvsEngine for KvStore {
         let e = Entry::Remove(k.clone());
         serde_json::to_writer(&mut self.writer, &e)
             .context(ErrorKind::IOError)?;
-
+        self.writer.flush()
+            .context(ErrorKind::IOError)?;
+            
         self.map.remove(&k);
 
         Ok(())
@@ -103,39 +104,40 @@ impl KvStore {
         let file_path : PathBuf = path.into();
         let logs = KvStore::get_log_numbers(file_path.clone())?;
         
-        let mut files = HashMap::new();
+        let mut readers = HashMap::new();
         let mut map = BTreeMap::new();
         let index = logs.last().unwrap_or(&1).clone();
         for it in logs.iter() {
             let mut log_file_path = file_path.clone();
             log_file_path.push(KvStore::get_log_name(*it));
-            let mut log_file = OpenOptions::new()
+            let mut reader = ReadSeeker::new(OpenOptions::new()
                         .read(true)
                         .open(log_file_path)
-                        .context(ErrorKind::IOError)?;
-            KvStore::init_memory_a_file(&mut map, *it, &mut log_file)?;
-            files.insert(*it, log_file);
+                        .context(ErrorKind::IOError)?);
+            
+            KvStore::init_memory_a_file(&mut map, *it, &mut reader)?;
+            readers.insert(*it, reader);
         } 
 
         let mut log_file = file_path.clone();
         log_file.push(KvStore::get_log_name(index));
 
-        let file = OpenOptions::new()
+        let writer = WriteSeeker::new(OpenOptions::new()
                     .write(true)
                     .truncate(false)
                     .create(true)
                     .open(current_dir().unwrap().join(log_file.clone()))
-                    .context(ErrorKind::IOError)?;
-        let reader = OpenOptions::new()
+                    .context(ErrorKind::IOError)?);
+        let reader = ReadSeeker::new(OpenOptions::new()
                     .read(true)
                     .open(current_dir().unwrap().join(log_file))
-                    .context(ErrorKind::IOError)?;
-        files.insert(index, reader);
+                    .context(ErrorKind::IOError)?);
+        readers.insert(index, reader);
         
         Ok(Self {
             map,
-            writer: file,
-            files,
+            writer,
+            readers,
             workdir: file_path,
             index,
             compact_size: 0,
@@ -148,7 +150,7 @@ impl KvStore {
 
         let current_file = &mut self.writer;
         for pos in &mut self.map.values_mut() {
-            if let Some(file) = self.files.get_mut(&pos.log_no) {
+            if let Some(file) = self.readers.get_mut(&pos.log_no) {
                 
                 file.seek(SeekFrom::Start(pos.offset))
                     .context(ErrorKind::IOError)?;
@@ -181,7 +183,7 @@ impl KvStore {
         for log in logs.iter() {
             if *log < self.index {
                 let log_name = KvStore::get_log_name(*log);
-                self.files.remove(log);
+                self.readers.remove(log);
                 let mut log_path= self.workdir.clone();
                 log_path.push(log_name);
                 fs::remove_file(log_path)
@@ -194,18 +196,18 @@ impl KvStore {
     fn open_new_log(&mut self) -> Result<()> {
         let mut file_path = self.workdir.clone();
         file_path.push(KvStore::get_log_name(self.index));
-        let file = OpenOptions::new()
+        let writer = WriteSeeker::new(OpenOptions::new()
                     .write(true)
                     .truncate(false)
                     .create(true)
                     .open(file_path.clone())
-                    .context(ErrorKind::IOError)?;
-        self.writer = file;
-        let reader = OpenOptions::new()
+                    .context(ErrorKind::IOError)?);
+        self.writer = writer;
+        let reader = ReadSeeker::new(OpenOptions::new()
             .read(true)
             .open(file_path)
-            .context(ErrorKind::IOError)?;
-        self.files.insert(self.index, reader);
+            .context(ErrorKind::IOError)?);
+        self.readers.insert(self.index, reader);
             
         Ok(())
     }
@@ -214,12 +216,10 @@ impl KvStore {
         format!("{}.log", id)
     }
 
-    fn init_memory_a_file(map: &mut BTreeMap<String, Position>, log_no: u64, file: &mut File) -> Result<()> {
-        file.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
+    fn init_memory_a_file<R: Read + Seek>(map: &mut BTreeMap<String, Position>, log_no: u64, reader: &mut ReadSeeker<R>) -> Result<()> {
+        reader.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
 
-        let reader = BufReader::new(file);
         let mut offset  = 0;
-
         let mut stream = serde_json::Deserializer::from_reader(reader)
             .into_iter::<Entry>();
 
@@ -258,5 +258,67 @@ impl KvStore {
 
         logs.sort_unstable();
         Ok(logs)
+    }
+}
+
+struct ReadSeeker <R: Read + Seek> {
+    reader: BufReader<R>,
+    pos: usize,
+}
+
+impl<R: Read + Seek> ReadSeeker<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            pos: 0,
+            reader: BufReader::new(reader),
+        }
+    }
+}
+
+impl<R: Read + Seek> Read for ReadSeeker<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, io::Error> {
+        let len = self.reader.read(buf)?;
+        self.pos += len;
+        Ok(len)
+    }
+}
+
+impl<R: Read + Seek> Seek for ReadSeeker<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::result::Result<u64, std::io::Error> {
+        self.pos = self.reader.seek(pos)? as usize;
+        Ok(self.pos as u64)
+    }
+}
+
+struct WriteSeeker <W: Write + Seek> {
+    writer: BufWriter<W>,
+    pos: usize,
+}
+
+impl<W: Write + Seek> WriteSeeker<W> {
+    fn new(writer: W) -> Self {
+        Self {
+            pos: 0,
+            writer: BufWriter::new(writer),
+        }
+    }
+}
+
+impl<R: Write + Seek> Write for WriteSeeker<R> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let len = self.writer.write(buf)?;
+        self.pos += len;
+        Ok(len)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+impl<W: Write + Seek> Seek for WriteSeeker<W> {
+    fn seek(&mut self, pos: SeekFrom) -> std::result::Result<u64, std::io::Error> {
+        self.pos = self.writer.seek(pos)? as usize;
+        Ok(self.pos as u64)
     }
 }
