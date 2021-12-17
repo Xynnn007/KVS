@@ -23,7 +23,7 @@ struct Position {
     size: u64
 }
 
-const MAX_SIZE : u64 = 1024;
+const MAX_SIZE : u64 = 1024 * 1024;
 pub struct KvStore {
     map: HashMap<String, Position>,
     files: HashMap<u64, File>,
