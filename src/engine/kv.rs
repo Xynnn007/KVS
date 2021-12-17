@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::env::current_dir;
-use std::io::SeekFrom;
+use std::io::{SeekFrom, Write};
 use std::fs::{File, OpenOptions, self};
 use std::path::PathBuf;
-use std::io::{Write, Seek, BufReader, BufRead, Read, self};
+use std::io::{Seek, BufReader, Read, self};
 
 use failure::ResultExt;
 use serde::{Serialize, Deserialize};
@@ -25,7 +25,7 @@ struct Position {
 
 const MAX_SIZE : u64 = 1024 * 1024;
 pub struct KvStore {
-    map: HashMap<String, Position>,
+    map: BTreeMap<String, Position>,
     files: HashMap<u64, File>,
     workdir: PathBuf,
     writer: File,
@@ -35,7 +35,21 @@ pub struct KvStore {
 
 impl KvsEngine for KvStore {
     fn set(&mut self, k: String, v: String) -> Result<()> {
-        self.write_entry(k, v)?;
+        let e = Entry::Set(k.clone(), v);
+        let offset = self.writer.seek(SeekFrom::Current(0))
+            .context(ErrorKind::IOError)?;
+        serde_json::to_writer(&mut self.writer, &e).context(ErrorKind::IOError)?;
+        let end = self.writer.seek(SeekFrom::Current(0))
+            .context(ErrorKind::IOError)?;
+        self.writer.flush()
+            .context(ErrorKind::IOError)?;
+        if let Some(old_pos) = self.map.insert(k, Position{
+            log_no: self.index,
+            offset,
+            size: end - offset,
+        }) {
+            self.compact_size += old_pos.size;
+        }
         
         // if size overflowed
         if self.compact_size > MAX_SIZE {
@@ -46,29 +60,31 @@ impl KvsEngine for KvStore {
     }
 
     fn get(&mut self, k: String) -> Result<Option<String>> {
-        let escape_k = snailquote::escape(&k).to_string();
-        match self.map.get(&escape_k) {
-            Some(pos) => {
-                self.get_from_file(pos)
-            },
-            None => {
-                Ok(None)
-            }
+       if let Some(pos) = self.map.get(&k) {
+                let fd = self.files.get_mut(&pos.log_no).ok_or(ErrorKind::IOError)?;
+                fd.seek(SeekFrom::Start(pos.offset))
+                    .context(ErrorKind::IOError)?;
+                let reader = fd.take(pos.size);
+                if let Entry::Set(.., value) = serde_json::from_reader(reader).context(ErrorKind::IOError)? { 
+                    Ok(Some(value))
+                } else {
+                    Err(ErrorKind::LogError)?
+                }
+        } else {
+            Ok(None)
         }
     }
 
     fn remove(&mut self, k: String) -> Result<()> {
-        let escape_k = snailquote::escape(&k).to_string();
-        if !self.map.contains_key(&escape_k) {
+        if !self.map.contains_key(&k) {
             Err(ErrorKind::NoEntryError)?
         }
 
-        let e = Entry::Remove(escape_k.clone());
-        let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
-            
-        self.writer.write(&bincode).context(ErrorKind::IOError)?;
+        let e = Entry::Remove(k.clone());
+        serde_json::to_writer(&mut self.writer, &e)
+            .context(ErrorKind::IOError)?;
 
-        self.map.remove(&escape_k);
+        self.map.remove(&k);
 
         Ok(())
     }
@@ -88,7 +104,7 @@ impl KvStore {
         let logs = KvStore::get_log_numbers(file_path.clone())?;
         
         let mut files = HashMap::new();
-        let mut map = HashMap::new();
+        let mut map = BTreeMap::new();
         let index = logs.last().unwrap_or(&1).clone();
         for it in logs.iter() {
             let mut log_file_path = file_path.clone();
@@ -124,29 +140,6 @@ impl KvStore {
             index,
             compact_size: 0,
         })
-    }
-
-    fn get_from_file(&self, pos: &Position) -> Result<Option<String>> {
-        let mut fd = match self.files.get(&pos.log_no) {
-            Some(d) => d,
-            None => Err(ErrorKind::LogError)?
-        };
-        fd.seek(SeekFrom::Start(0))
-            .context(ErrorKind::IOError)?;
-        let mut reader = BufReader::new(fd);
-        reader.seek(SeekFrom::Start(pos.offset))
-            .context(ErrorKind::IOError)?;
-        match bincode::deserialize_from(reader)
-            .context(ErrorKind::IOError)? {
-                Entry::Set(_, v) => {
-                    let r = snailquote::unescape(&v)
-                        .context(ErrorKind::IOError)?;
-                    Ok(Some(r))
-                },
-                Entry::Remove(_) => {
-                    Err(ErrorKind::LogError)?
-                }
-        }
     }
 
     fn compact(&mut self) -> Result<()> {
@@ -221,58 +214,31 @@ impl KvStore {
         format!("{}.log", id)
     }
 
-    fn write_entry(&mut self, k: String, v: String) -> Result<()> {
-        let escape_k = snailquote::escape(&k).to_string();
-        let escape_v = snailquote::escape(&v).to_string();
-        let e = Entry::Set(escape_k.clone(), escape_v);
-        
-        let bincode = bincode::serialize(&e).context(ErrorKind::IOError)?;
-        
-        let offset = write_entry_data_to_file(&bincode, &mut self.writer)?;
-
-        if let Some(old_pos) = self.map.insert(escape_k, Position{
-            log_no: self.index,
-            offset,
-            size: bincode.len() as u64 + 1,
-        }) {
-            self.compact_size += old_pos.size;
-        }
-        
-        Ok(())
-    }
-
-    fn init_memory_a_file(map: &mut HashMap<String, Position>, log_no: u64, file: &mut File) -> Result<()> {
+    fn init_memory_a_file(map: &mut BTreeMap<String, Position>, log_no: u64, file: &mut File) -> Result<()> {
         file.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
 
-        let mut reader = BufReader::new(file);
+        let reader = BufReader::new(file);
         let mut offset  = 0;
 
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line)
-                .context(ErrorKind::IOError)?;
+        let mut stream = serde_json::Deserializer::from_reader(reader)
+            .into_iter::<Entry>();
 
-            if line.is_empty() || line.ends_with("\r\n") {
-                break;
-            }
-
-            match bincode::deserialize(line.as_bytes())
-                .context(ErrorKind::IOError)? {
+        while let Some(e) = stream.next() {
+            let new_pow = stream.byte_offset() as u64;
+            match e.context(ErrorKind::SerializeError)? {
                 Entry::Set(k1, _) => {
                     map.insert(k1, Position {
                         log_no, 
                         offset,
-                        size: line.len() as u64,
+                        size: new_pow  - offset,
                     });
                 },
                 Entry::Remove(k1) => {
                     map.remove(&k1);
                 }
             }
-            offset += line.len() as u64;
+            offset = new_pow;
         }
-
-        reader.seek(SeekFrom::End(0)).context(ErrorKind::IOError)?;
         Ok(())
     }
 
@@ -293,14 +259,4 @@ impl KvStore {
         logs.sort_unstable();
         Ok(logs)
     }
-}
-
-fn write_entry_data_to_file(bincode: &Vec<u8>, fd: &mut File) -> Result<u64> {
-    let offset = fd.seek(SeekFrom::Current(0))
-        .context(ErrorKind::IOError)?;
-
-    fd.write(&bincode).context(ErrorKind::IOError)?;
-    fd.write("\n".as_bytes()).context(ErrorKind::IOError)?;
-    fd.flush().context(ErrorKind::IOError)?;
-    Ok(offset)
 }
