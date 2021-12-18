@@ -5,6 +5,7 @@ use crate::{err::*, KvsEngine};
 use failure::ResultExt;
 use sled::Db;
 
+#[derive(Clone)]
 pub struct SledKvsEngine {
     db: Db, 
 }

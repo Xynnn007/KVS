@@ -5,7 +5,7 @@ pub use err::Error;
 pub use err::ErrorKind;
 
 pub mod engine;
-pub mod server;
+// pub mod server;
 pub mod client;
 pub mod err;
 pub mod protocol;

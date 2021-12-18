@@ -5,7 +5,7 @@ use std::{path::Path, fs};
 
 use clap::{App, Arg, AppSettings};
 use failure::ResultExt;
-use kvs::server::{KvsServer, KvsServerConfig};
+// use kvs::server::{KvsServer, KvsServerConfig};
 use log::*;
 
 use kvs::err::*;
@@ -61,9 +61,8 @@ fn main() -> Result<()> {
 
     info!("ENGINE: {}", engine);
     info!("Serve {}", address);
-    let mut server = KvsServer::new(&KvsServerConfig {address, engine})?;
-    server.run()?;
+    // let mut server = KvsServer::new(&KvsServerConfig {address, engine})?;
+    // server.run()?;
     
     Ok(())
 }
-

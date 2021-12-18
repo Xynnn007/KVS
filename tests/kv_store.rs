@@ -1,6 +1,6 @@
 use kvs::{KvStore, KvsEngine, Result};
 use std::sync::{Arc, Barrier};
-use std::thread;
+use std::{thread, fs};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 

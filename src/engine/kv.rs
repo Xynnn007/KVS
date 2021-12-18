@@ -4,6 +4,7 @@ use std::io::{SeekFrom, Write, BufWriter};
 use std::fs::{File, OpenOptions, self};
 use std::path::PathBuf;
 use std::io::{Seek, BufReader, Read, self};
+use std::sync::{Arc, Mutex};
 
 use failure::ResultExt;
 use serde::{Serialize, Deserialize};
@@ -24,68 +25,111 @@ struct Position {
 }
 
 const MAX_SIZE : u64 = 1024 * 1024;
+
+// #[derive(Clone)]
 pub struct KvStore {
-    map: BTreeMap<String, Position>,
-    readers: HashMap<u64, ReadSeeker<File>>,
-    workdir: PathBuf,
-    writer: WriteSeeker<File>,
-    index: u64,
-    compact_size: u64,
+    map: Arc<Mutex<BTreeMap<String, Position>>>,
+    readers: Arc<Mutex<HashMap<u64, ReadSeeker<File>>>>,
+    workdir: Arc<Mutex<PathBuf>>,
+    writer: Arc<Mutex<WriteSeeker<File>>>,
+    index: Arc<Mutex<u64>>,
+    compact_size: Arc<Mutex<u64>>,
+}
+
+impl Clone for KvStore {
+    fn clone(&self) -> Self {
+        Self { 
+            map: self.map.clone(), 
+            readers: self.readers.clone(), 
+            workdir: self.workdir.clone(), 
+            writer: self.writer.clone(), 
+            index: self.index.clone(), 
+            compact_size: self.compact_size.clone() 
+        }
+    }
+}
+
+macro_rules! atomic {
+    ($expr: expr) => {
+        $expr.clone().lock().unwrap()
+    };
+}
+
+macro_rules! atomic_ref {
+    ($expr: expr) => {
+        *($expr.clone().lock().unwrap())
+    };
+}
+
+macro_rules! atomic_new {
+    ($expr: expr) => {
+        Arc::new(Mutex::new($expr))
+    };
 }
 
 impl KvsEngine for KvStore {
-    fn set(&mut self, k: String, v: String) -> Result<()> {
+    fn set(&self, k: String, v: String) -> Result<()> {
         let e = Entry::Set(k.clone(), v);
-        let offset = self.writer.pos as u64;
-        serde_json::to_writer(&mut self.writer, &e).context(ErrorKind::IOError)?;
-        self.writer.flush()
-            .context(ErrorKind::IOError)?;
-        let end = self.writer.pos as u64;
-          
-        if let Some(old_pos) = self.map.insert(k, Position{
-            log_no: self.index,
+        let offset: u64;
+        let end: u64;
+        let writer = self.writer.clone();
+        {
+            let mut writer = writer.lock().unwrap();
+            offset = writer.pos as u64;
+            serde_json::to_writer(&mut *writer, &e).context(ErrorKind::IOError)?;
+            writer.flush()
+                .context(ErrorKind::IOError)?;
+            end = writer.pos as u64;
+        }
+        if let Some(old_pos) = atomic!(self.map).insert(k, Position{
+            log_no: atomic_ref!(self.index),
             offset,
             size: end - offset,
         }) {
-            self.compact_size += old_pos.size;
+            atomic_ref!(self.compact_size) += old_pos.size;
         }
         
         // if size overflowed
-        if self.compact_size > MAX_SIZE {
+        if atomic_ref!(self.compact_size) > MAX_SIZE {
             self.compact()?;
         }
 
         Ok(())
     }
 
-    fn get(&mut self, k: String) -> Result<Option<String>> {
-       if let Some(pos) = self.map.get(&k) {
-                let reader = self.readers.get_mut(&pos.log_no).ok_or(ErrorKind::IOError)?;
-                reader.seek(SeekFrom::Start(pos.offset))
-                    .context(ErrorKind::IOError)?;
-                let reader = reader.take(pos.size);
-                if let Entry::Set(.., value) = serde_json::from_reader(reader).context(ErrorKind::IOError)? { 
-                    Ok(Some(value))
-                } else {
-                    Err(ErrorKind::LogError)?
-                }
+    fn get(&self, k: String) -> Result<Option<String>> {
+       if let Some(pos) = atomic!(self.map).get(&k) {
+            let readers_mutex = self.readers.clone();
+            let mut readers = readers_mutex.lock().unwrap();
+            let reader = readers.get_mut(&pos.log_no).ok_or(ErrorKind::IOError)?;
+            reader.seek(SeekFrom::Start(pos.offset))
+                .context(ErrorKind::IOError)?;
+            let reader = reader.take(pos.size);
+
+            if let Entry::Set(.., value) = serde_json::from_reader(reader)
+                .context(ErrorKind::IOError)? { 
+                    println!("{:?}", value);
+                Ok(Some(value))
+            } else {
+                Err(ErrorKind::LogError)?
+            }
         } else {
             Ok(None)
         }
     }
 
-    fn remove(&mut self, k: String) -> Result<()> {
-        if !self.map.contains_key(&k) {
+    fn remove(&self, k: String) -> Result<()> {
+        if !atomic!(self.map).contains_key(&k) {
             Err(ErrorKind::NoEntryError)?
         }
 
         let e = Entry::Remove(k.clone());
-        serde_json::to_writer(&mut self.writer, &e)
+        serde_json::to_writer(&mut atomic_ref!(self.writer), &e)
             .context(ErrorKind::IOError)?;
-        self.writer.flush()
+        atomic!(self.writer).flush()
             .context(ErrorKind::IOError)?;
             
-        self.map.remove(&k);
+        atomic!(self.map).remove(&k);
 
         Ok(())
     }
@@ -131,33 +175,31 @@ impl KvStore {
         readers.insert(index, reader);
         
         Ok(Self {
-            map,
-            writer,
-            readers,
-            workdir: file_path,
-            index,
-            compact_size: 0,
+            map: atomic_new!(map),
+            writer: atomic_new!(writer),
+            readers: atomic_new!(readers),
+            workdir: atomic_new!(file_path),
+            index: atomic_new!(index),
+            compact_size: atomic_new!(0),
         })
     }
 
-    fn compact(&mut self) -> Result<()> {
-        self.index += 1;
+    fn compact(&self) -> Result<()> {
+        atomic_ref!(self.index) += 1;
         self.open_new_log()?;
 
-        let current_file = &mut self.writer;
-        for pos in &mut self.map.values_mut() {
-            if let Some(file) = self.readers.get_mut(&pos.log_no) {
-                
+        for pos in &mut atomic!(self.map).values_mut() {
+            if let Some(file) = atomic!(self.readers).get_mut(&pos.log_no) {
                 file.seek(SeekFrom::Start(pos.offset))
                     .context(ErrorKind::IOError)?;
                 let mut reader = io::BufReader::new(file.take(pos.size));
-                let offset = current_file.seek(SeekFrom::Current(0))
+                let offset = atomic_ref!(self.writer).seek(SeekFrom::Current(0))
                     .context(ErrorKind::IOError)?;
-                io::copy(&mut reader, current_file)
+                io::copy(&mut reader, &mut atomic_ref!(self.writer))
                     .context(ErrorKind::IOError)?;
                 
                 *pos = Position {
-                    log_no: self.index,
+                    log_no: atomic_ref!(self.index),
                     offset,
                     size: pos.size
                 };
@@ -168,19 +210,19 @@ impl KvStore {
         }
 
         self.delete_old_logs()?;
-        self.index += 1;
+        atomic_ref!(self.index) += 1;
         self.open_new_log()?;
-        self.compact_size = 0;
+        atomic_ref!(self.compact_size) = 0;
         Ok(())
     }
 
-    fn delete_old_logs(&mut self) -> Result<()> {
-        let logs = KvStore::get_log_numbers(self.workdir.clone())?;
+    fn delete_old_logs(&self) -> Result<()> {
+        let logs = KvStore::get_log_numbers(atomic!(self.workdir).clone())?;
         for log in logs.iter() {
-            if *log < self.index {
+            if *log < atomic_ref!(self.index) {
                 let log_name = KvStore::get_log_name(*log);
-                self.readers.remove(log);
-                let mut log_path= self.workdir.clone();
+                atomic!(self.readers).remove(log);
+                let mut log_path= atomic!(self.workdir).clone();
                 log_path.push(log_name);
                 fs::remove_file(log_path)
                     .context(ErrorKind::IOError)?;
@@ -189,21 +231,21 @@ impl KvStore {
         Ok(())
     }
 
-    fn open_new_log(&mut self) -> Result<()> {
-        let mut file_path = self.workdir.clone();
-        file_path.push(KvStore::get_log_name(self.index));
+    fn open_new_log(&self) -> Result<()> {
+        let mut file_path = atomic!(self.workdir).clone();
+        file_path.push(KvStore::get_log_name(atomic_ref!(self.index)));
         let writer = WriteSeeker::new(OpenOptions::new()
                     .write(true)
                     .truncate(false)
                     .create(true)
                     .open(file_path.clone())
                     .context(ErrorKind::IOError)?);
-        self.writer = writer;
+        atomic_ref!(self.writer) = writer;
         let reader = ReadSeeker::new(OpenOptions::new()
             .read(true)
             .open(file_path)
             .context(ErrorKind::IOError)?);
-        self.readers.insert(self.index, reader);
+        atomic!(self.readers).insert(atomic_ref!(self.index), reader);
             
         Ok(())
     }
@@ -212,7 +254,7 @@ impl KvStore {
         format!("{}.log", id)
     }
 
-    fn init_memory_a_file<R: Read + Seek>(map: &mut BTreeMap<String, Position>, log_no: u64, reader: &mut ReadSeeker<R>) -> Result<()> {
+    fn init_memory_a_file<R: Read + Seek + Sync>(map: &mut BTreeMap<String, Position>, log_no: u64, reader: &mut ReadSeeker<R>) -> Result<()> {
         reader.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
 
         let mut offset  = 0;
@@ -262,7 +304,7 @@ struct ReadSeeker <R: Read + Seek> {
     pos: usize,
 }
 
-impl<R: Read + Seek> ReadSeeker<R> {
+impl<R: Read + Seek + Sync> ReadSeeker<R> {
     fn new(reader: R) -> Self {
         Self {
             pos: 0,
@@ -271,7 +313,7 @@ impl<R: Read + Seek> ReadSeeker<R> {
     }
 }
 
-impl<R: Read + Seek> Read for ReadSeeker<R> {
+impl<R: Read + Seek + Sync> Read for ReadSeeker<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, io::Error> {
         let len = self.reader.read(buf)?;
         self.pos += len;
@@ -279,19 +321,19 @@ impl<R: Read + Seek> Read for ReadSeeker<R> {
     }
 }
 
-impl<R: Read + Seek> Seek for ReadSeeker<R> {
+impl<R: Read + Seek + Sync> Seek for ReadSeeker<R> {
     fn seek(&mut self, pos: SeekFrom) -> std::result::Result<u64, std::io::Error> {
         self.pos = self.reader.seek(pos)? as usize;
         Ok(self.pos as u64)
     }
 }
 
-struct WriteSeeker <W: Write + Seek> {
+struct WriteSeeker <W: Write + Seek + Sync> {
     writer: BufWriter<W>,
     pos: usize,
 }
 
-impl<W: Write + Seek> WriteSeeker<W> {
+impl<W: Write + Seek + Sync> WriteSeeker<W> {
     fn new(writer: W) -> Self {
         Self {
             pos: 0,
@@ -300,7 +342,7 @@ impl<W: Write + Seek> WriteSeeker<W> {
     }
 }
 
-impl<R: Write + Seek> Write for WriteSeeker<R> {
+impl<R: Write + Seek + Sync> Write for WriteSeeker<R> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let len = self.writer.write(buf)?;
         self.pos += len;
@@ -312,7 +354,7 @@ impl<R: Write + Seek> Write for WriteSeeker<R> {
     }
 }
 
-impl<W: Write + Seek> Seek for WriteSeeker<W> {
+impl<W: Write + Seek + Sync> Seek for WriteSeeker<W> {
     fn seek(&mut self, pos: SeekFrom) -> std::result::Result<u64, std::io::Error> {
         self.pos = self.writer.seek(pos)? as usize;
         Ok(self.pos as u64)
