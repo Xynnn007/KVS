@@ -1,10 +1,10 @@
 use crate::err::*;
 
 mod kv;
-// mod sled;
+mod sled;
 
 pub use self::kv::KvStore;
-// pub use self::sled::SledKvsEngine;
+pub use self::sled::SledKvsEngine;
 
 pub trait KvsEngine: Clone + Send + 'static {
     fn set(&self, key: String, value: String) -> Result<()>;

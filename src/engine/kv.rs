@@ -26,7 +26,6 @@ struct Position {
 
 const MAX_SIZE : u64 = 1024 * 1024;
 
-// #[derive(Clone)]
 pub struct KvStore {
     map: Arc<Mutex<BTreeMap<String, Position>>>,
     readers: Arc<Mutex<HashMap<u64, ReadSeeker<File>>>>,

@@ -5,7 +5,9 @@ use std::{path::Path, fs};
 
 use clap::{App, Arg, AppSettings};
 use failure::ResultExt;
-// use kvs::server::{KvsServer, KvsServerConfig};
+use kvs::engine::SledKvsEngine;
+use kvs::server::KvsServer;
+use kvs::{KvStore, KvsEngine};
 use log::*;
 
 use kvs::err::*;
@@ -49,20 +51,31 @@ fn main() -> Result<()> {
                                .default_value("kvs"))
         .get_matches();
     
-    let engine  = matches.value_of("engine name")
+    let engine_name  = matches.value_of("engine name")
                 .unwrap();
 
     let address   = matches.value_of("server address")
                 .unwrap();
 
-    if !judge_engine_flag(engine)? {
+    if !judge_engine_flag(engine_name)? {
         Err(ErrorKind::EngineError)?
     }    
 
-    info!("ENGINE: {}", engine);
+    info!("ENGINE: {}", engine_name);
     info!("Serve {}", address);
-    // let mut server = KvsServer::new(&KvsServerConfig {address, engine})?;
-    // server.run()?;
-    
-    Ok(())
+
+    run_with_name(address, engine_name)
+}
+
+fn run_with_name(address: &str, engine_name: &str) -> Result<()> {
+    match engine_name {
+        "kvs" => run(address, KvStore::new()?),
+        "sled" => run(address, SledKvsEngine::new()?),
+        _ => run(address, KvStore::new()?),
+    }
+}
+
+fn run<E: KvsEngine>(address: &str, e: E) -> Result<()> {
+    let mut server = KvsServer::new(address, e)?;
+    server.run()
 }
