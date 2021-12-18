@@ -1,3 +1,5 @@
+use std::io::BufReader;
+use std::io::BufWriter;
 use std::io::Write;
 use std::net::TcpStream;
 
@@ -29,12 +31,14 @@ impl KvsClient {
 
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
         let op = Operation::Set(key, value, self.index);
-        op.to_writer(&mut self.stream)?;
-        self.stream.flush().context(ErrorKind::NetworkError)?;
+        let mut writer = BufWriter::new(&self.stream);
+        let mut reader = BufReader::new(&self.stream);
+        op.to_writer(&mut writer)?;
+        writer.flush().context(ErrorKind::NetworkError)?;
 
         self.index += 1;
         
-        match Operation::get_operation_from_reader(&mut self.stream)? {
+        match Operation::get_operation_from_reader(&mut reader)? {
             Operation::Ok(_, id) => {
                 if id != self.index - 1{
                     Err(ErrorKind::OperationError)?
@@ -50,12 +54,14 @@ impl KvsClient {
 
     pub fn get(&mut self, key: String) -> Result<Option<String>> {
         let op = Operation::Get(key, self.index);
-        op.to_writer(&mut self.stream)?;
-        self.stream.flush().context(ErrorKind::NetworkError)?;
+        let mut writer = BufWriter::new(&self.stream);
+        let mut reader = BufReader::new(&self.stream);
+        op.to_writer(&mut writer)?;
+        writer.flush().context(ErrorKind::NetworkError)?;
 
         self.index += 1;
         
-        match Operation::get_operation_from_reader(&mut self.stream)? {
+        match Operation::get_operation_from_reader(&mut reader)? {
             Operation::Ok(value, id) => {
                 if id != self.index - 1{
                     Err(ErrorKind::OperationError)?
@@ -71,12 +77,14 @@ impl KvsClient {
 
     pub fn remove(&mut self, key: String) -> Result<()> {
         let op = Operation::Remove(key, self.index);
-        op.to_writer(&mut self.stream)?;
-        self.stream.flush().context(ErrorKind::NetworkError)?;
+        let mut writer = BufWriter::new(&self.stream);
+        let mut reader = BufReader::new(&self.stream);
+        op.to_writer(&mut writer)?;
+        writer.flush().context(ErrorKind::NetworkError)?;
 
         self.index += 1;
         
-        match Operation::get_operation_from_reader(&mut self.stream)? {
+        match Operation::get_operation_from_reader(&mut reader)? {
             Operation::Ok(_, id) => {
                 if id != self.index - 1{
                     Err(ErrorKind::OperationError)?
