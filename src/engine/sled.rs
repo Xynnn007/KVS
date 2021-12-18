@@ -1,52 +1,40 @@
-use std::{env::current_dir, path::PathBuf, sync::{Arc, Mutex}};
+use std::{env::current_dir, path::PathBuf, sync::Arc};
 
 use crate::{err::*, KvsEngine};
 
 use failure::ResultExt;
 use sled::Db;
 
+#[derive(Clone)]
 pub struct SledKvsEngine {
     db: Db, 
-}
-
-impl Clone for SledKvsEngine {
-    fn clone(&self) -> Self {
-        Self { 
-            db: self.db.clone(), 
-        }
-    }
 }
 
 impl KvsEngine for SledKvsEngine {
     fn set(&self, key: String, value: String) -> Result<()> {
         self.db.insert(key, value.as_bytes())
             .context(ErrorKind::SledError)?;
-
+        self.db.flush().context(ErrorKind::SledError)?;
         Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        match self.db.get(key)
-            .context(ErrorKind::SledError)? {
-            Some(iv) => {
-                let str = String::from_utf8(iv.to_vec())
-                    .context(ErrorKind::Utf8Error)?;
-                Ok(Some(str))
-            },
-            None => {
-                Ok(None)
-            }
-        }
+        let res = self.db.get(key).context(ErrorKind::SledError)?
+                .map(|iv|iv.to_vec())
+                .map(|v|  {
+                    String::from_utf8(v)
+                })
+                .transpose()
+                .context(ErrorKind::Utf8Error)?;
+        Ok(res)
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        if !self.db.contains_key(&key).context(ErrorKind::SledError)? {
-            Err(ErrorKind::NoEntryError)?
-        }
-
         self.db.remove(key)
+                .context(ErrorKind::SledError)?
+                .ok_or(ErrorKind::NoEntryError)?;
+        self.db.flush()
                 .context(ErrorKind::SledError)?;
-
         Ok(())
     }
 }
