@@ -35,7 +35,7 @@ impl<E: KvsEngine, T: ThreadPool> KvsServer<E, T> {
             match stream.context(ErrorKind::NetworkError) {
                 Ok(stream) => {
                     let engine = self.engine.clone();
-                    self.thread_pool.spawn(|| {
+                    self.thread_pool.spawn(move || {
                         match handle_client(engine, stream) {
                             Ok(()) => {},
                             Err(e) => error!("stream handle error {}.", e),

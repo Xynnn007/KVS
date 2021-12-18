@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate clap;
 
+use std::env::current_dir;
 use std::{path::Path, fs};
 
 use clap::{App, Arg, AppSettings};
@@ -71,16 +72,19 @@ fn main() -> Result<()> {
 fn run_with_name(address: &str, engine_name: &str) -> Result<()> {
     match engine_name {
         "kvs" => run(address, KvStore::new()?),
-        "sled" => run(address, SledKvsEngine::new()?),
+        "sled" => run(address, SledKvsEngine::new(
+            sled::open(
+                current_dir().context(ErrorKind::IOError)?
+            )
+            .context(ErrorKind::SledError)?
+        )?),
         _ => run(address, KvStore::new()?),
     }
 }
 
 fn run<E: KvsEngine>(address: &str, e: E) -> Result<()> {
-    let server = KvsServer::new(
-        address,
-  e, 
-  NaiveThreadPool::new(0)?
-    )?;
+    let pool = NaiveThreadPool::new(0)?;
+
+    let server = KvsServer::new(address,e, pool)?;
     server.run()
 }

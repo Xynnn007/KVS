@@ -1,4 +1,4 @@
-use std::{env::current_dir, path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use crate::{err::*, KvsEngine};
 
@@ -40,8 +40,10 @@ impl KvsEngine for SledKvsEngine {
 }
 
 impl SledKvsEngine {
-    pub fn new() -> Result<Self> {
-        SledKvsEngine::open(current_dir().context(ErrorKind::IOError)?)
+    pub fn new(db: Db) -> Result<Self> {
+        Ok(Self {
+            db
+        })
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
