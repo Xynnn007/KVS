@@ -35,10 +35,6 @@ impl KvsEngine for SledKvsEngine {
             .context(ErrorKind::SledError)?;
         Ok(())
     }
-
-    fn name(&mut self) -> String {
-        "SledKvsEngine".to_string()
-    }
 }
 
 impl SledKvsEngine {

@@ -89,10 +89,6 @@ impl KvsEngine for KvStore {
 
         Ok(())
     }
-
-    fn name(&mut self) -> String {
-        "KvStore".to_string()
-    }
 }
 
 impl KvStore {
@@ -106,7 +102,7 @@ impl KvStore {
         
         let mut readers = HashMap::new();
         let mut map = BTreeMap::new();
-        let index = logs.last().unwrap_or(&1).clone();
+        let index = *logs.last().unwrap_or(&1);
         for it in logs.iter() {
             let mut log_file_path = file_path.clone();
             log_file_path.push(KvStore::get_log_name(*it));

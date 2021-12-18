@@ -4,11 +4,9 @@ use crate::engine::*;
 use crate::err::*;
 use crate::protocol::*;
 
-use std::fs;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::net::{TcpListener};
-use std::path::Path;
 
 pub struct KvsServer {
     engine: Box<dyn KvsEngine>,
@@ -20,8 +18,6 @@ pub struct KvsServerConfig<'a> {
     pub engine: &'a str,
 }
 
-const ENGINE_FLAG_FILE: &str = ".engine_flag";
-
 impl KvsServer {
     pub fn new(config: &KvsServerConfig) -> Result<Self> {
         let address = config.address.parse::<SocketAddr>()
@@ -29,12 +25,8 @@ impl KvsServer {
         let listener = TcpListener::bind(address)
             .context(ErrorKind::NetworkError)?;
 
-        if !KvsServer::judge_engine_flag(&config.address[..])? {
-            Err(ErrorKind::EngineError)?
-        }
-
         Ok(Self {
-            engine: match &config.address[..] {
+            engine: match config.engine {
                 "kvs" => {
                     Box::new(KvStore::new()?)
                 }
@@ -55,16 +47,6 @@ impl KvsServer {
         }
 
         Ok(())
-    }
-
-    fn judge_engine_flag(name: &str) -> Result<bool> {
-        if !Path::new(ENGINE_FLAG_FILE).exists() {
-            fs::write(ENGINE_FLAG_FILE, name).context(ErrorKind::IOError)?;
-            Ok(true)
-        } else {
-            let exist = fs::read(ENGINE_FLAG_FILE).context(ErrorKind::IOError)?;
-            Ok(exist.eq(name.as_bytes()))
-        }
     }
 }
 

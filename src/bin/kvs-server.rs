@@ -1,11 +1,26 @@
 #[macro_use]
 extern crate clap;
 
+use std::{path::Path, fs};
+
 use clap::{App, Arg, AppSettings};
+use failure::ResultExt;
 use kvs::server::{KvsServer, KvsServerConfig};
 use log::*;
 
 use kvs::err::*;
+
+const ENGINE_FLAG_FILE: &str = ".engine_flag";
+
+fn judge_engine_flag(name: &str) -> Result<bool> {
+    if !Path::new(ENGINE_FLAG_FILE).exists() {
+        fs::write(ENGINE_FLAG_FILE, name).context(ErrorKind::IOError)?;
+        Ok(true)
+    } else {
+        let exist = fs::read(ENGINE_FLAG_FILE).context(ErrorKind::IOError)?;
+        Ok(exist.eq(name.as_bytes()))
+    }
+}
 
 fn main() -> Result<()> {
     stderrlog::new().module(module_path!())
@@ -40,6 +55,10 @@ fn main() -> Result<()> {
     let address   = matches.value_of("server address")
                 .unwrap();
 
+    if !judge_engine_flag(engine)? {
+        Err(ErrorKind::EngineError)?
+    }    
+
     info!("ENGINE: {}", engine);
     info!("Serve {}", address);
     let mut server = KvsServer::new(&KvsServerConfig {address, engine})?;
@@ -47,3 +66,4 @@ fn main() -> Result<()> {
     
     Ok(())
 }
+

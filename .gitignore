@@ -1,3 +1,11 @@
+# rust build files
 /target
-storage.bin
+
+# kvs local storage
+*.log
+
+# vscode cache
 /.vscode
+
+# engine name
+.engine_flag
