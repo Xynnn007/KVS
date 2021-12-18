@@ -107,7 +107,6 @@ impl KvsEngine for KvStore {
 
             if let Entry::Set(.., value) = serde_json::from_reader(reader)
                 .context(ErrorKind::IOError)? { 
-                    println!("{:?}", value);
                 Ok(Some(value))
             } else {
                 Err(ErrorKind::LogError)?

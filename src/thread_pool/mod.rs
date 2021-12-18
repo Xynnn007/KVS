@@ -9,6 +9,6 @@ pub trait ThreadPool {
     where Self: Sized;
 
     fn spawn<F>(&self, job: F) 
-        where F:FnOnce() + Send + 'static;
+    where F:FnOnce() + Send + 'static;
 }
 

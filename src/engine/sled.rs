@@ -6,7 +6,7 @@ use failure::ResultExt;
 use sled::Db;
 
 pub struct SledKvsEngine {
-    db: Arc<Mutex<Db>>, 
+    db: Db, 
 }
 
 impl Clone for SledKvsEngine {
@@ -19,41 +19,33 @@ impl Clone for SledKvsEngine {
 
 impl KvsEngine for SledKvsEngine {
     fn set(&self, key: String, value: String) -> Result<()> {
-        let db = self.db.clone();
-        {
-            let mu_db = db.lock().unwrap();
-            mu_db.insert(key, value.as_bytes())
+        self.db.insert(key, value.as_bytes())
             .context(ErrorKind::SledError)?;
-        }
 
         Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        let db = self.db.clone();
-        {
-            let mu_db = db.lock().unwrap();
-            match mu_db.get(key)
-                .context(ErrorKind::SledError)? {
-                Some(iv) => {
-                    let str = String::from_utf8(iv.to_vec())
-                        .context(ErrorKind::Utf8Error)?;
-                    Ok(Some(str))
-                },
-                None => {
-                    Ok(None)
-                }
+        match self.db.get(key)
+            .context(ErrorKind::SledError)? {
+            Some(iv) => {
+                let str = String::from_utf8(iv.to_vec())
+                    .context(ErrorKind::Utf8Error)?;
+                Ok(Some(str))
+            },
+            None => {
+                Ok(None)
             }
         }
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        let db = self.db.clone();
-        {
-            let mu_db = db.lock().unwrap();
-            mu_db.remove(key)
-                .context(ErrorKind::SledError)?;
+        if !self.db.contains_key(&key).context(ErrorKind::SledError)? {
+            Err(ErrorKind::NoEntryError)?
         }
+
+        self.db.remove(key)
+                .context(ErrorKind::SledError)?;
 
         Ok(())
     }
@@ -68,7 +60,7 @@ impl SledKvsEngine {
         let db = sled::open(path.into())
             .context(ErrorKind::IOError)?;
         Ok(Self {
-            db: Arc::new(Mutex::new(db)),
+            db,
         })
     }
 }

@@ -7,6 +7,7 @@ use clap::{App, Arg, AppSettings};
 use failure::ResultExt;
 use kvs::engine::SledKvsEngine;
 use kvs::server::KvsServer;
+use kvs::thread_pool::{NaiveThreadPool, ThreadPool};
 use kvs::{KvStore, KvsEngine};
 use log::*;
 
@@ -76,6 +77,10 @@ fn run_with_name(address: &str, engine_name: &str) -> Result<()> {
 }
 
 fn run<E: KvsEngine>(address: &str, e: E) -> Result<()> {
-    let mut server = KvsServer::new(address, e)?;
+    let server = KvsServer::new(
+        address,
+  e, 
+  NaiveThreadPool::new(0)?
+    )?;
     server.run()
 }
