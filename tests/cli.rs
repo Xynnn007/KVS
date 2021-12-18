@@ -335,10 +335,3 @@ fn cli_access_server_kvs_engine() {
 fn cli_access_server_sled_engine() {
     cli_access_server("sled", "127.0.0.1:4005");
 }
-
-// #[test]
-// fn set_one_key() {
-//     let config = KvsClientConfig {address : "127.0.0.1:4000"};
-//     let mut client = KvsClient::new(&config).unwrap();
-//     client.set("key".to_string(), "value".to_string()).unwrap();
-// }

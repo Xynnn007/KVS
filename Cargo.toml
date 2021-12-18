@@ -23,6 +23,8 @@ stderrlog = "0.5.1"
 serde_json = "1.0.73"
 sled = "0.34.7"
 env_logger = "0.8.1"
+panic-control = "0.1.4"
+crossbeam-utils = "0.8.5"
 
 [dev-dependencies]
 criterion = "0.3"
