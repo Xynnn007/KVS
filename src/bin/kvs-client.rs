@@ -8,12 +8,12 @@ use clap::AppSettings;
 use clap::{App, Arg, SubCommand};
 use kvs::client::*;
 use kvs::err::*;
+use log::LevelFilter;
 
 fn main() -> Result<()> {
-    stderrlog::new().module(module_path!())
-                    // .verbosity(3)
-                    .init()
-                    .unwrap();
+    env_logger::builder()
+        .filter_level(LevelFilter::Info)
+        .init();
 
     let matches = App::new("kvs-client")
         .settings(&[AppSettings::UnifiedHelpMessage,

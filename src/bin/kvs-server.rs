@@ -27,10 +27,9 @@ fn judge_engine_flag(name: &str) -> Result<bool> {
 }
 
 fn main() -> Result<()> {
-    stderrlog::new().module(module_path!())
-                    .verbosity(2)
-                    .init()
-                    .unwrap();
+    env_logger::builder()
+        .filter_level(LevelFilter::Info)
+        .init();
 
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
     
