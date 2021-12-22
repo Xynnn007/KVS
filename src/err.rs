@@ -34,6 +34,8 @@ pub enum ErrorKind {
     Utf8Error,
     #[fail(display = "Engine error")]
     EngineError,
+    #[fail(display = "Rayon error")]
+    RayonError,
 }
 
 impl Fail for Error {
