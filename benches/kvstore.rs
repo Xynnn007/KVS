@@ -7,9 +7,9 @@ use tempfile::TempDir;
 
 fn format_key_value(c: &mut Criterion) {
 	let kvs_dir = TempDir::new().expect("unable to create temporary working directory");
-	let mut kvs = KvStore::open(kvs_dir.path()).unwrap();
+	let kvs = KvStore::open(kvs_dir.path()).unwrap();
 	let sled_dir = TempDir::new().expect("unable to create temporary working directory");
-	let mut sled = SledKvsEngine::open(sled_dir.path()).unwrap();
+	let sled = SledKvsEngine::open(sled_dir.path()).unwrap();
 	c.bench_function("kvs write", |b| b.iter(|| {
 		for i in 0..10000 {
 			assert!(kvs.set(format!("key{}", i), format!("value{}", i)).is_ok());
@@ -60,9 +60,9 @@ fn random_generated_key_value(c: &mut Criterion) {
 	println!("Init OK!");
 	println!("Create engines...");
 	let kvs_dir = TempDir::new().expect("unable to create temporary working directory");
-	let mut kvs = KvStore::open(kvs_dir.path()).unwrap();
+	let kvs = KvStore::open(kvs_dir.path()).unwrap();
 	let sled_dir = TempDir::new().expect("unable to create temporary working directory");
-	let mut sled = SledKvsEngine::open(sled_dir.path()).unwrap();
+	let sled = SledKvsEngine::open(sled_dir.path()).unwrap();
 
 	println!("Create engines...");
     c.bench_function("kvs write", |b| b.iter(|| {
