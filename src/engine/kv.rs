@@ -4,7 +4,7 @@ use std::io::{SeekFrom, Write, BufWriter};
 use std::fs::{File, OpenOptions, self};
 use std::path::PathBuf;
 use std::io::{Seek, BufReader, Read, self};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Serialize, Deserialize};
 
@@ -25,44 +25,22 @@ struct Position {
 
 const MAX_SIZE : u64 = 1024 * 1024;
 
+#[derive(Clone)]
 pub struct KvStore {
-    map: Arc<Mutex<BTreeMap<String, Position>>>,
-    readers: Arc<Mutex<HashMap<u64, ReadSeeker<File>>>>,
-    workdir: Arc<Mutex<PathBuf>>,
-    writer: Arc<Mutex<WriteSeeker<File>>>,
-    index: Arc<Mutex<u64>>,
-    compact_size: Arc<Mutex<u64>>,
+    map: Arc<RwLock<BTreeMap<String, Position>>>,
+    workdir: Arc<PathBuf>,
+    reader: Arc<Mutex<ReadModule>>,
+    writer: Arc<Mutex<WriteModule>>,
 }
 
-impl Clone for KvStore {
-    fn clone(&self) -> Self {
-        Self { 
-            map: self.map.clone(), 
-            readers: self.readers.clone(), 
-            workdir: self.workdir.clone(), 
-            writer: self.writer.clone(), 
-            index: self.index.clone(), 
-            compact_size: self.compact_size.clone() 
-        }
-    }
+struct ReadModule {
+    readers: HashMap<u64, ReadSeeker<File>>,
 }
 
-macro_rules! atomic {
-    ($expr: expr) => {
-        $expr.clone().lock().unwrap()
-    };
-}
-
-macro_rules! atomic_ref {
-    ($expr: expr) => {
-        *($expr.clone().lock().unwrap())
-    };
-}
-
-macro_rules! atomic_new {
-    ($expr: expr) => {
-        Arc::new(Mutex::new($expr))
-    };
+struct WriteModule {
+    writer: WriteSeeker<File>,
+    index: u64,
+    compact_size: u64,
 }
 
 impl KvsEngine for KvStore {
@@ -70,24 +48,25 @@ impl KvsEngine for KvStore {
         let e = Entry::Set(k.clone(), v);
         let offset: u64;
         let end: u64;
-        let writer = self.writer.clone();
-        {
-            let mut writer = writer.lock().unwrap();
-            offset = writer.pos as u64;
-            serde_json::to_writer(&mut *writer, &e)?;
-            writer.flush()?;
-            end = writer.pos as u64;
-        }
-        if let Some(old_pos) = atomic!(self.map).insert(k, Position{
-            log_no: atomic_ref!(self.index),
-            offset,
-            size: end - offset,
-        }) {
-            atomic_ref!(self.compact_size) += old_pos.size;
-        }
+        let compact_size = {
+            let mut w = self.writer.lock().unwrap();
+            offset = w.writer.pos as u64;
+            serde_json::to_writer(&mut w.writer, &e)?;
+            w.writer.flush()?;
+            end = w.writer.pos as u64;
+
+            if let Some(old_pos) = self.map.write().unwrap().insert(k, Position{
+                log_no: w.index,
+                offset,
+                size: end - offset,
+            }) {
+                w.compact_size += old_pos.size;
+            }
+            w.compact_size
+        };
         
         // if size overflowed
-        if atomic_ref!(self.compact_size) > MAX_SIZE {
+        if compact_size > MAX_SIZE {
             self.compact()?;
         }
 
@@ -95,10 +74,9 @@ impl KvsEngine for KvStore {
     }
 
     fn get(&self, k: String) -> Result<Option<String>> {
-       if let Some(pos) = atomic!(self.map).get(&k) {
-            let readers_mutex = self.readers.clone();
-            let mut readers = readers_mutex.lock().unwrap();
-            let reader = readers.get_mut(&pos.log_no)
+       if let Some(pos) = self.map.read().unwrap().get(&k) {
+            let mut reader = self.reader.lock().unwrap();
+            let reader = reader.readers.get_mut(&pos.log_no)
                 .ok_or(KvsError::IOError(io::Error::new(std::io::ErrorKind::Other, "get reader failed")))?;
             reader.seek(SeekFrom::Start(pos.offset))?;
             let reader = reader.take(pos.size);
@@ -115,10 +93,15 @@ impl KvsEngine for KvStore {
 
     fn remove(&self, k: String) -> Result<()> {
         let e = Entry::Remove(k.clone());
-        serde_json::to_writer(&mut atomic_ref!(self.writer), &e)?;
-        atomic!(self.writer).flush()?;
-            
-        if let None = atomic!(self.map).remove(&k) {
+        
+        {
+            let writer = self.writer.clone();
+            let mut writer = writer.lock().unwrap();
+            serde_json::to_writer(&mut writer.writer, &e)?;
+            writer.writer.flush()?;
+        }
+        
+        if let None = self.map.write().unwrap().remove(&k) {
             Err(KvsError::NoEntryError)?
         }
 
@@ -163,71 +146,108 @@ impl KvStore {
         readers.insert(index, reader);
         
         Ok(Self {
-            map: atomic_new!(map),
-            writer: atomic_new!(writer),
-            readers: atomic_new!(readers),
-            workdir: atomic_new!(file_path),
-            index: atomic_new!(index),
-            compact_size: atomic_new!(0),
+            map: Arc::new(RwLock::new(map)),
+            writer: Arc::new(Mutex::new(WriteModule {
+                writer,
+                index,
+                compact_size: 0,
+            })),
+            reader: Arc::new(Mutex::new(ReadModule {
+                readers,
+            })),
+            workdir: Arc::new(file_path),
         })
     }
 
     fn compact(&self) -> Result<()> {
-        atomic_ref!(self.index) += 1;
-        self.open_new_log()?;
-
-        for pos in &mut atomic!(self.map).values_mut() {
-            if let Some(file) = atomic!(self.readers).get_mut(&pos.log_no) {
-                file.seek(SeekFrom::Start(pos.offset))?;
-                let mut reader = io::BufReader::new(file.take(pos.size));
-                let offset = atomic_ref!(self.writer).seek(SeekFrom::Current(0))?;
-                io::copy(&mut reader, &mut atomic_ref!(self.writer))?;
-                
-                *pos = Position {
-                    log_no: atomic_ref!(self.index),
-                    offset,
-                    size: pos.size
-                };
-
-                file.seek(SeekFrom::End(0))?;
-            }
+        {
+            let mut writer = self.writer.lock().unwrap();
+            writer.index += 1;
         }
 
-        self.delete_old_logs()?;
-        atomic_ref!(self.index) += 1;
         self.open_new_log()?;
-        atomic_ref!(self.compact_size) = 0;
+
+        {
+            let mut writer = self.writer.lock().unwrap();
+            for pos in &mut self.map.write().unwrap().values_mut() {
+                if let Some(file) = self.reader.lock().unwrap().readers.get_mut(&pos.log_no) {
+                    file.seek(SeekFrom::Start(pos.offset))?;
+                    let mut reader = io::BufReader::new(file.take(pos.size));
+                    let offset = writer.writer.seek(SeekFrom::Current(0))?;
+                    io::copy(&mut reader, &mut writer.writer)?;
+                    
+                    *pos = Position {
+                        log_no: writer.index,
+                        offset,
+                        size: pos.size
+                    };
+
+                    file.seek(SeekFrom::End(0))?;
+                }
+            }
+        }
+        self.delete_old_logs()?;
+        {
+            let mut writer = self.writer.lock().unwrap();
+            writer.index += 1;
+        }
+        self.open_new_log()?;
+        {
+            let mut writer = self.writer.lock().unwrap();
+            writer.compact_size = 0;
+        }
         Ok(())
     }
 
     fn delete_old_logs(&self) -> Result<()> {
-        let logs = KvStore::get_log_numbers(atomic!(self.workdir).clone())?;
+        let logs = KvStore::get_log_numbers(self.workdir.to_path_buf())?;
+        let index = {
+            self.writer.lock().unwrap().index
+        };
+        let mut delete_files = vec![];
+
         for log in logs.iter() {
-            if *log < atomic_ref!(self.index) {
+            if *log < index {
                 let log_name = KvStore::get_log_name(*log);
-                atomic!(self.readers).remove(log);
-                let mut log_path= atomic!(self.workdir).clone();
+                {
+                    self.reader.lock().unwrap().readers.remove(log);
+                }
+                let mut log_path= (*self.workdir).clone();
                 log_path.push(log_name);
-                fs::remove_file(log_path)?;
+                delete_files.push(log_path);
+                
             }
         }
+
+        for f in delete_files {
+            fs::remove_file(f.as_path())?;
+        }
+
         Ok(())
     }
 
     fn open_new_log(&self) -> Result<()> {
-        let mut file_path = atomic!(self.workdir).clone();
-        file_path.push(KvStore::get_log_name(atomic_ref!(self.index)));
+        let mut file_path = (*self.workdir).clone();
+        {
+            let w = self.writer.lock().unwrap();
+            file_path.push(KvStore::get_log_name(w.index));
+        }
+
         let writer = WriteSeeker::new(OpenOptions::new()
                     .write(true)
                     .truncate(false)
                     .create(true)
-                    .open(file_path.clone())?);
-        atomic_ref!(self.writer) = writer;
+                    .open(file_path.as_path())?);
         let reader = ReadSeeker::new(OpenOptions::new()
-            .read(true)
-            .open(file_path)?);
-        atomic!(self.readers).insert(atomic_ref!(self.index), reader);
-            
+                    .read(true)
+                    .open(file_path.as_path())?);
+
+        {
+            let mut w = self.writer.lock().unwrap();
+            w.writer = writer;
+            self.reader.lock().unwrap().readers.insert(w.index, reader);
+        }
+
         Ok(())
     }
 
