@@ -3,8 +3,6 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::net::TcpStream;
 
-use failure::ResultExt;
-
 use crate::err::*;
 use crate::protocol::*;
 
@@ -19,8 +17,7 @@ pub struct KvsClientConfig<'a> {
 
 impl KvsClient {
     pub fn new(config: &KvsClientConfig) -> Result<Self> {
-        let stream = TcpStream::connect(config.address)
-            .context(ErrorKind::NetworkError)?;
+        let stream = TcpStream::connect(config.address)?;
         Ok (
             Self {
                 stream,
@@ -34,21 +31,21 @@ impl KvsClient {
         let mut writer = BufWriter::new(&self.stream);
         let mut reader = BufReader::new(&self.stream);
         op.to_writer(&mut writer)?;
-        writer.flush().context(ErrorKind::NetworkError)?;
+        writer.flush()?;
 
         self.index += 1;
         
         match Operation::get_operation_from_reader(&mut reader)? {
             Operation::Ok(_, id) => {
                 if id != self.index - 1{
-                    Err(ErrorKind::OperationError)?
+                    Err(KvsError::OperationError)?
                 }
                 Ok(())
             },
-            Operation::Error(e, _) => {
-                Err(e)?
+            Operation::Error(_) => {
+                Err(KvsError::OperationError)?
             },
-            _ => Err(ErrorKind::OperationError)?
+            _ => Err(KvsError::OperationError)?
         }
     }
 
@@ -57,21 +54,21 @@ impl KvsClient {
         let mut writer = BufWriter::new(&self.stream);
         let mut reader = BufReader::new(&self.stream);
         op.to_writer(&mut writer)?;
-        writer.flush().context(ErrorKind::NetworkError)?;
+        writer.flush()?;
 
         self.index += 1;
         
         match Operation::get_operation_from_reader(&mut reader)? {
             Operation::Ok(value, id) => {
                 if id != self.index - 1{
-                    Err(ErrorKind::OperationError)?
+                    Err(KvsError::OperationError)?
                 }
                 Ok(value)
             },
-            Operation::Error(e, _) => {
-                Err(e)?
+            Operation::Error( _) => {
+                Err(KvsError::OperationError)?
             },
-            _ => Err(ErrorKind::OperationError)?
+            _ => Err(KvsError::OperationError)?
         }
     }
 
@@ -80,21 +77,21 @@ impl KvsClient {
         let mut writer = BufWriter::new(&self.stream);
         let mut reader = BufReader::new(&self.stream);
         op.to_writer(&mut writer)?;
-        writer.flush().context(ErrorKind::NetworkError)?;
+        writer.flush()?;
 
         self.index += 1;
         
         match Operation::get_operation_from_reader(&mut reader)? {
             Operation::Ok(_, id) => {
                 if id != self.index - 1{
-                    Err(ErrorKind::OperationError)?
+                    Err(KvsError::OperationError)?
                 }
                 Ok(())
             },
-            Operation::Error(e, _) => {
-                Err(e)?
+            Operation::Error(u64::MAX) => {
+                Err(KvsError::NoEntryError)?
             },
-            _ => Err(ErrorKind::OperationError)?
+            _ => Err(KvsError::OperationError)?
         }
     }
 }

@@ -1,5 +1,3 @@
-
-use failure::ResultExt;
 use rayon::ThreadPoolBuilder;
 
 use super::ThreadPool;
@@ -14,8 +12,7 @@ impl ThreadPool for RayonThreadPool{
     where Self: Sized {
         let pool = ThreadPoolBuilder::new()
             .num_threads(_threads as usize)
-            .build()
-            .context(ErrorKind::RayonError)?;
+            .build()?;
         Ok(Self {
             pool, 
         })

@@ -1,73 +1,70 @@
+use std::{io, string::FromUtf8Error, net::AddrParseError};
+
 use failure::*;
-use std::fmt;
+use rayon::ThreadPoolBuildError;
 
-use serde::{Serialize, Deserialize};
+pub type Result<T> = std::result::Result<T, KvsError>;
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug)]
-pub struct Error {
-    inner: Context<ErrorKind>,
-}
-
-#[derive(Copy, Clone, Debug, Fail, Serialize, Deserialize)]
-pub enum ErrorKind {
-    #[fail(display = "I/O error")]
-    IOError,
-    #[fail(display = "Subcommand error")]
-    SubCmdError,
-    #[fail(display = "Key not found")]
-    NoEntryError,
-    #[fail(display = "Inproper parameters")]
-    ParameterError,
-    #[fail(display = "Invalid log error")]
-    LogError,
-    #[fail(display = "Network error")]
-    NetworkError,
-    #[fail(display = "Serialize error")]
-    SerializeError,
+#[derive(Debug, Fail)]
+pub enum KvsError {
+    #[fail(display = "I/O error {}", _0)]
+    IOError(io::Error),
+    #[fail(display = "Serialize error, {}", _0)]
+    SerializeError(serde_json::Error),
     #[fail(display = "Operation error")]
     OperationError,
-    #[fail(display = "Sled error")]
-    SledError,
-    #[fail(display = "Utf8 encode/decode error")]
-    Utf8Error,
+    #[fail(display = "Sled error, {}", _0)]
+    SledError(sled::Error),
+
+    #[fail(display = "Key not found")]
+    NoEntryError,
+    #[fail(display = "Log type wrong")]
+    LogError,
+    #[fail(display = "Subcommand type wrong")]
+    SubCmdError,
+    #[fail(display = "Utf8 encode/decode error: {}", _0)]
+    Utf8Error(FromUtf8Error),
     #[fail(display = "Engine error")]
     EngineError,
-    #[fail(display = "Rayon error")]
-    RayonError,
+    #[fail(display = "Rayon error, {}", _0)]
+    RayonError(ThreadPoolBuildError),
+
+    #[fail(display = "Addr Parse Error, {}", _0)]
+    AddrParseError(AddrParseError),
 }
 
-impl Fail for Error {
-    fn cause(&self) -> Option<&dyn Fail> {
-        self.inner.cause()
-    }
-
-    fn backtrace(&self) -> Option<&Backtrace> {
-        self.inner.backtrace()
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.inner, f)
+impl From<serde_json::Error> for KvsError {
+    fn from (e: serde_json::Error) -> KvsError {
+        KvsError::SerializeError(e)
     }
 }
 
-impl Error {
-    pub fn kind(&self) -> ErrorKind {
-        *self.inner.get_context()
+impl From<io::Error> for KvsError {
+    fn from (e: io::Error) -> KvsError {
+        KvsError::IOError(e)
     }
 }
 
-impl From<ErrorKind> for Error {
-    fn from (kind: ErrorKind) -> Error {
-        Error { inner: Context::new(kind) }
+impl From<sled::Error> for KvsError {
+    fn from (e: sled::Error) -> KvsError {
+        KvsError::SledError(e)
     }
 }
 
-impl From<Context<ErrorKind>> for Error {
-    fn from (inner: Context<ErrorKind>) -> Error {
-        Error { inner }
+impl From<FromUtf8Error> for KvsError {
+    fn from (e: FromUtf8Error) -> KvsError {
+        KvsError::Utf8Error(e)
+    }
+}
+
+impl From<ThreadPoolBuildError> for KvsError {
+    fn from (e: ThreadPoolBuildError) -> KvsError {
+        KvsError::RayonError(e)
+    }
+}
+
+impl From<AddrParseError> for KvsError {
+    fn from (e: AddrParseError) -> KvsError {
+        KvsError::AddrParseError(e)
     }
 }

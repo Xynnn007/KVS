@@ -1,8 +1,7 @@
 pub use engine::KvsEngine;
 pub use engine::KvStore;
 pub use err::Result;
-pub use err::Error;
-pub use err::ErrorKind;
+pub use err::KvsError;
 
 pub mod engine;
 pub mod server;

@@ -33,3 +33,7 @@ criterion = "0.3"
 [[bench]]
 name = "kvstore"
 harness = false
+
+[[bench]]
+name = "thread"
+harness = false

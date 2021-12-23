@@ -98,8 +98,8 @@ fn main() -> Result<()> {
 
             match kv.remove(k) {
                 Ok(_) => {},
-                Err(e) => match e.kind() {
-                    ErrorKind::NoEntryError => {
+                Err(e) => match e {
+                    KvsError::NoEntryError => {
                         eprintln!("Key not found");
                         process::exit(-1);
                     },
@@ -120,7 +120,7 @@ fn main() -> Result<()> {
                 None => println!("Key not found")
             }
         },
-        _ => Err(ErrorKind::SubCmdError)?,
+        _ => Err(KvsError::SubCmdError)?,
     }
     Ok(())
 }

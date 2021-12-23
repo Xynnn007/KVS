@@ -1,6 +1,5 @@
 use std::io;
 
-use failure::ResultExt;
 use serde::{Serialize, Deserialize};
 
 use crate::err::*;
@@ -11,15 +10,14 @@ pub enum Operation {
     Get(String, u64),
     Remove(String, u64),
     Ok(Option<String>, u64),
-    Error(ErrorKind, u64),
+    Error(u64),
 }
 
 impl Operation {
     pub fn to_writer<W>(&self, w: &mut W) -> Result<()> 
     where W: io::Write
     {
-        serde_json::to_writer(w, self)
-            .context(ErrorKind::SerializeError)?;
+        serde_json::to_writer(w, self)?;
         
         Ok(())
     }
@@ -28,7 +26,6 @@ impl Operation {
     where R: io::Read
     {
         let mut de = serde_json::Deserializer::from_reader(r);
-        Ok(Operation::deserialize(&mut de)
-            .context(ErrorKind::SerializeError)?)
+        Ok(Operation::deserialize(&mut de)?)
     }
 }

@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::io::{Seek, BufReader, Read, self};
 use std::sync::{Arc, Mutex};
 
-use failure::ResultExt;
 use serde::{Serialize, Deserialize};
 
 use crate::engine::KvsEngine;
@@ -75,9 +74,8 @@ impl KvsEngine for KvStore {
         {
             let mut writer = writer.lock().unwrap();
             offset = writer.pos as u64;
-            serde_json::to_writer(&mut *writer, &e).context(ErrorKind::IOError)?;
-            writer.flush()
-                .context(ErrorKind::IOError)?;
+            serde_json::to_writer(&mut *writer, &e)?;
+            writer.flush()?;
             end = writer.pos as u64;
         }
         if let Some(old_pos) = atomic!(self.map).insert(k, Position{
@@ -100,16 +98,15 @@ impl KvsEngine for KvStore {
        if let Some(pos) = atomic!(self.map).get(&k) {
             let readers_mutex = self.readers.clone();
             let mut readers = readers_mutex.lock().unwrap();
-            let reader = readers.get_mut(&pos.log_no).ok_or(ErrorKind::IOError)?;
-            reader.seek(SeekFrom::Start(pos.offset))
-                .context(ErrorKind::IOError)?;
+            let reader = readers.get_mut(&pos.log_no)
+                .ok_or(KvsError::IOError(io::Error::new(std::io::ErrorKind::Other, "get reader failed")))?;
+            reader.seek(SeekFrom::Start(pos.offset))?;
             let reader = reader.take(pos.size);
 
-            if let Entry::Set(.., value) = serde_json::from_reader(reader)
-                .context(ErrorKind::IOError)? { 
+            if let Entry::Set(.., value) = serde_json::from_reader(reader)? { 
                 Ok(Some(value))
             } else {
-                Err(ErrorKind::LogError)?
+                Err(KvsError::LogError)?
             }
         } else {
             Ok(None)
@@ -117,17 +114,13 @@ impl KvsEngine for KvStore {
     }
 
     fn remove(&self, k: String) -> Result<()> {
-        if !atomic!(self.map).contains_key(&k) {
-            Err(ErrorKind::NoEntryError)?
-        }
-
         let e = Entry::Remove(k.clone());
-        serde_json::to_writer(&mut atomic_ref!(self.writer), &e)
-            .context(ErrorKind::IOError)?;
-        atomic!(self.writer).flush()
-            .context(ErrorKind::IOError)?;
+        serde_json::to_writer(&mut atomic_ref!(self.writer), &e)?;
+        atomic!(self.writer).flush()?;
             
-        atomic!(self.map).remove(&k);
+        if let None = atomic!(self.map).remove(&k) {
+            Err(KvsError::NoEntryError)?
+        }
 
         Ok(())
     }
@@ -135,7 +128,7 @@ impl KvsEngine for KvStore {
 
 impl KvStore {
     pub fn new() -> Result<Self> {
-        KvStore::open(current_dir().context(ErrorKind::IOError)?)
+        KvStore::open(current_dir()?)
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
@@ -150,8 +143,7 @@ impl KvStore {
             log_file_path.push(KvStore::get_log_name(*it));
             let mut reader = ReadSeeker::new(OpenOptions::new()
                         .read(true)
-                        .open(log_file_path)
-                        .context(ErrorKind::IOError)?);
+                        .open(log_file_path)?);
             
             KvStore::init_memory_a_file(&mut map, *it, &mut reader)?;
             readers.insert(*it, reader);
@@ -164,12 +156,10 @@ impl KvStore {
                     .write(true)
                     .truncate(false)
                     .create(true)
-                    .open(current_dir().unwrap().join(log_file.clone()))
-                    .context(ErrorKind::IOError)?);
+                    .open(current_dir().unwrap().join(log_file.clone()))?);
         let reader = ReadSeeker::new(OpenOptions::new()
                     .read(true)
-                    .open(current_dir().unwrap().join(log_file))
-                    .context(ErrorKind::IOError)?);
+                    .open(current_dir().unwrap().join(log_file))?);
         readers.insert(index, reader);
         
         Ok(Self {
@@ -188,13 +178,10 @@ impl KvStore {
 
         for pos in &mut atomic!(self.map).values_mut() {
             if let Some(file) = atomic!(self.readers).get_mut(&pos.log_no) {
-                file.seek(SeekFrom::Start(pos.offset))
-                    .context(ErrorKind::IOError)?;
+                file.seek(SeekFrom::Start(pos.offset))?;
                 let mut reader = io::BufReader::new(file.take(pos.size));
-                let offset = atomic_ref!(self.writer).seek(SeekFrom::Current(0))
-                    .context(ErrorKind::IOError)?;
-                io::copy(&mut reader, &mut atomic_ref!(self.writer))
-                    .context(ErrorKind::IOError)?;
+                let offset = atomic_ref!(self.writer).seek(SeekFrom::Current(0))?;
+                io::copy(&mut reader, &mut atomic_ref!(self.writer))?;
                 
                 *pos = Position {
                     log_no: atomic_ref!(self.index),
@@ -202,8 +189,7 @@ impl KvStore {
                     size: pos.size
                 };
 
-                file.seek(SeekFrom::End(0))
-                    .context(ErrorKind::IOError)?;
+                file.seek(SeekFrom::End(0))?;
             }
         }
 
@@ -222,8 +208,7 @@ impl KvStore {
                 atomic!(self.readers).remove(log);
                 let mut log_path= atomic!(self.workdir).clone();
                 log_path.push(log_name);
-                fs::remove_file(log_path)
-                    .context(ErrorKind::IOError)?;
+                fs::remove_file(log_path)?;
             }
         }
         Ok(())
@@ -236,13 +221,11 @@ impl KvStore {
                     .write(true)
                     .truncate(false)
                     .create(true)
-                    .open(file_path.clone())
-                    .context(ErrorKind::IOError)?);
+                    .open(file_path.clone())?);
         atomic_ref!(self.writer) = writer;
         let reader = ReadSeeker::new(OpenOptions::new()
             .read(true)
-            .open(file_path)
-            .context(ErrorKind::IOError)?);
+            .open(file_path)?);
         atomic!(self.readers).insert(atomic_ref!(self.index), reader);
             
         Ok(())
@@ -253,7 +236,7 @@ impl KvStore {
     }
 
     fn init_memory_a_file<R: Read + Seek + Sync>(map: &mut BTreeMap<String, Position>, log_no: u64, reader: &mut ReadSeeker<R>) -> Result<()> {
-        reader.seek(SeekFrom::Start(0)).context(ErrorKind::IOError)?;
+        reader.seek(SeekFrom::Start(0))?;
 
         let mut offset  = 0;
         let mut stream = serde_json::Deserializer::from_reader(reader)
@@ -261,7 +244,7 @@ impl KvStore {
 
         while let Some(e) = stream.next() {
             let new_pow = stream.byte_offset() as u64;
-            match e.context(ErrorKind::SerializeError)? {
+            match e? {
                 Entry::Set(k1, _) => {
                     map.insert(k1, Position {
                         log_no, 
@@ -279,8 +262,8 @@ impl KvStore {
     }
 
     fn get_log_numbers(file_path: PathBuf) -> Result<Vec<u64>> {     
-        let mut logs: Vec<u64> = fs::read_dir(file_path).context(ErrorKind::IOError)?
-            .flat_map(|f| -> Result<_> {Ok(f.context(ErrorKind::IOError)?.path())})
+        let mut logs: Vec<u64> = fs::read_dir(file_path)?
+            .flat_map(|f| -> Result<_> {Ok(f?.path())})
             .filter(|f| {f.is_file()})
             .filter(|f|f.extension() == Some("log".as_ref()))
             .flat_map(|path| {

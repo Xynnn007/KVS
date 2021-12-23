@@ -1,5 +1,5 @@
-use failure::ResultExt;
 use log::error;
+use log::warn;
 
 use crate::engine::*;
 use crate::err::*;
@@ -20,10 +20,8 @@ pub struct KvsServer<E: KvsEngine, T: ThreadPool> {
 
 impl<E: KvsEngine, T: ThreadPool> KvsServer<E, T> {
     pub fn new(address: &str, engine: E, thread_pool: T) -> Result<Self> {
-        let address = address.parse::<SocketAddr>()
-            .context(ErrorKind::ParameterError)?;
-        let listener = TcpListener::bind(address)
-            .context(ErrorKind::NetworkError)?;
+        let address = address.parse::<SocketAddr>()?;
+        let listener = TcpListener::bind(address)?;
         
         Ok(Self {
             engine,
@@ -34,7 +32,7 @@ impl<E: KvsEngine, T: ThreadPool> KvsServer<E, T> {
 
     pub fn run(&self) -> Result<()> {
         for stream in self.listener.incoming() {
-            match stream.context(ErrorKind::NetworkError) {
+            match stream {
                 Ok(stream) => {
                     let engine = self.engine.clone();
                     self.thread_pool.spawn(move || {
@@ -59,43 +57,55 @@ fn handle_client<E: KvsEngine>(engine: E, stream: TcpStream) -> Result<()> {
         Operation::Set(k, v, index) => {
             match engine.set(k, v) {
                 Err(e) => {
-                    Operation::Error(e.kind(), index).to_writer(&mut writer)?;
-                    writer.flush().context(ErrorKind::NetworkError)?;
+                    error!("{}", e);
+                    Operation::Error(index).to_writer(&mut writer)?;
+                    writer.flush()?;
                 }
                 _ => {
                     Operation::Ok(Some(String::new()), index).to_writer(&mut writer)?;
-                    writer.flush().context(ErrorKind::NetworkError)?;
+                    writer.flush()?;
                 }
             }
         },
         Operation::Get(k, index) => {
             match engine.get(k) {
                 Err(e) => {
-                    Operation::Error(e.kind(), index).to_writer(&mut writer)?;
-                    writer.flush().context(ErrorKind::NetworkError)?;
+                    error!("{}", e);
+                    Operation::Error(index).to_writer(&mut writer)?;
+                    writer.flush()?;
                 }
                 Ok(value) => {
                     Operation::Ok(value, index).to_writer(&mut writer)?;
-                    writer.flush().context(ErrorKind::NetworkError)?;
+                    writer.flush()?;
                 }
             }
         },
         Operation::Remove(k, index) => {
             match engine.remove(k) {
                 Err(e) => {
-                    Operation::Error(e.kind(), index).to_writer(&mut writer)?;
-                    writer.flush().context(ErrorKind::NetworkError)?;
+                    match e {
+                        KvsError::NoEntryError => {
+                            Operation::Error(u64::MAX).to_writer(&mut writer)?;
+                            warn!("{}", e);
+                        },
+                        _ => {
+                            Operation::Error(index).to_writer(&mut writer)?;
+                            error!("{}", e);
+                        },
+                    }
+                    writer.flush()?;
                 }
                 _ => {
                     Operation::Ok(Some(String::new()), index).to_writer(&mut writer)?;
-                    writer.flush().context(ErrorKind::NetworkError)?;
+                    writer.flush()?;
                 }
             }
         },
         _ => {
-            Operation::Error(ErrorKind::OperationError, 0).to_writer(&mut writer)?;
-            writer.flush().context(ErrorKind::NetworkError)?;
-            Err(ErrorKind::OperationError)?
+            error!("get a wrong type operation");
+            Operation::Error(0).to_writer(&mut writer)?;
+            writer.flush()?;
+            Err(KvsError::OperationError)?
         }
     }
     Ok(())

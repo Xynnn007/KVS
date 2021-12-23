@@ -5,7 +5,6 @@ use std::env::current_dir;
 use std::{path::Path, fs};
 
 use clap::{App, Arg, AppSettings};
-use failure::ResultExt;
 use kvs::engine::SledKvsEngine;
 use kvs::server::KvsServer;
 use kvs::thread_pool::{NaiveThreadPool, ThreadPool};
@@ -18,10 +17,10 @@ const ENGINE_FLAG_FILE: &str = ".engine_flag";
 
 fn judge_engine_flag(name: &str) -> Result<bool> {
     if !Path::new(ENGINE_FLAG_FILE).exists() {
-        fs::write(ENGINE_FLAG_FILE, name).context(ErrorKind::IOError)?;
+        fs::write(ENGINE_FLAG_FILE, name)?;
         Ok(true)
     } else {
-        let exist = fs::read(ENGINE_FLAG_FILE).context(ErrorKind::IOError)?;
+        let exist = fs::read(ENGINE_FLAG_FILE)?;
         Ok(exist.eq(name.as_bytes()))
     }
 }
@@ -59,7 +58,7 @@ fn main() -> Result<()> {
                 .unwrap();
 
     if !judge_engine_flag(engine_name)? {
-        Err(ErrorKind::EngineError)?
+        Err(KvsError::EngineError)?
     }    
 
     info!("ENGINE: {}", engine_name);
@@ -73,9 +72,8 @@ fn run_with_name(address: &str, engine_name: &str) -> Result<()> {
         "kvs" => run(address, KvStore::new()?),
         "sled" => run(address, SledKvsEngine::new(
             sled::open(
-                current_dir().context(ErrorKind::IOError)?
-            )
-            .context(ErrorKind::SledError)?
+                current_dir()?
+            )?
         )?),
         _ => run(address, KvStore::new()?),
     }
