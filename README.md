@@ -9,11 +9,11 @@ follow the course [talent-plan](https://github.com/pingcap/talent-plan).
 Well, please refer to [talent-plan](https://github.com/pingcap/talent-plan) for more
 information.
 
-- [√] Project 1
-- [√] Project 2
-- [√] Project 3
+- [x] Project 1
+- [x] Project 2
+- [x] Project 3
 - [x] Project 4
-- [x] Project 5
+- [ ] Project 5
 
 ## Performance
 
