@@ -26,6 +26,7 @@ env_logger = "0.8.1"
 panic-control = "0.1.4"
 crossbeam-utils = "0.8.5"
 rayon = "1.5.1"
+crossbeam-skiplist = { git = "https://github.com/crossbeam-rs/crossbeam.git", branch = "master" }
 
 [dev-dependencies]
 criterion = "0.3"

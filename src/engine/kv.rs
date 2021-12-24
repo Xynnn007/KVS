@@ -1,12 +1,15 @@
-use std::collections::{HashMap, BTreeMap};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::env::current_dir;
-use std::io::{SeekFrom, Write, BufWriter};
+use std::io::{SeekFrom, Write, BufWriter, Take};
 use std::fs::{File, OpenOptions, self};
 use std::path::PathBuf;
 use std::io::{Seek, BufReader, Read, self};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU64,Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
 
 use serde::{Serialize, Deserialize};
+use crossbeam_skiplist::SkipMap;
 
 use crate::engine::KvsEngine;
 use crate::err::*;
@@ -25,87 +28,228 @@ struct Position {
 
 const MAX_SIZE : u64 = 1024 * 1024;
 
-#[derive(Clone)]
 pub struct KvStore {
-    map: Arc<RwLock<BTreeMap<String, Position>>>,
     workdir: Arc<PathBuf>,
-    reader: Arc<Mutex<ReadModule>>,
+    reader: ReadModule,
     writer: Arc<Mutex<WriteModule>>,
+    map: Arc<SkipMap<String, Position>>,
 }
 
 struct ReadModule {
-    readers: HashMap<u64, ReadSeeker<File>>,
+    readers: RefCell<BTreeMap<u64, ReadSeeker<File>>>,
+    newest_index: Arc<AtomicU64>, 
+    workdir: Arc<PathBuf>
+}
+
+impl ReadModule {
+    fn new(newest_index : Arc<AtomicU64>, workdir: Arc<PathBuf>) -> Self {
+        Self {
+            readers: RefCell::new(BTreeMap::new()),
+            newest_index,
+            workdir,
+        }
+    }
 }
 
 struct WriteModule {
+    reader: ReadModule,
+    map: Arc<SkipMap<String, Position>>,
     writer: WriteSeeker<File>,
     index: u64,
+    workdir: Arc<PathBuf>,
     compact_size: u64,
 }
 
 impl KvsEngine for KvStore {
     fn set(&self, k: String, v: String) -> Result<()> {
-        let e = Entry::Set(k.clone(), v);
-        let offset: u64;
-        let end: u64;
-        let compact_size = {
-            let mut w = self.writer.lock().unwrap();
-            offset = w.writer.pos as u64;
-            serde_json::to_writer(&mut w.writer, &e)?;
-            w.writer.flush()?;
-            end = w.writer.pos as u64;
-
-            if let Some(old_pos) = self.map.write().unwrap().insert(k, Position{
-                log_no: w.index,
-                offset,
-                size: end - offset,
-            }) {
-                w.compact_size += old_pos.size;
-            }
-            w.compact_size
-        };
-        
-        // if size overflowed
-        if compact_size > MAX_SIZE {
-            self.compact()?;
-        }
-
-        Ok(())
+        self.writer.lock().unwrap().set(k, v)
     }
 
     fn get(&self, k: String) -> Result<Option<String>> {
-       if let Some(pos) = self.map.read().unwrap().get(&k) {
-            let mut reader = self.reader.lock().unwrap();
-            let reader = reader.readers.get_mut(&pos.log_no)
-                .ok_or(KvsError::IOError(io::Error::new(std::io::ErrorKind::Other, "get reader failed")))?;
-            reader.seek(SeekFrom::Start(pos.offset))?;
-            let reader = reader.take(pos.size);
-
-            if let Entry::Set(.., value) = serde_json::from_reader(reader)? { 
-                Ok(Some(value))
-            } else {
-                Err(KvsError::LogError)?
-            }
+        if let Some(pos) = self.map.get(&k) {
+            Ok (self.reader.read(pos.value())?)
         } else {
             Ok(None)
         }
     }
 
     fn remove(&self, k: String) -> Result<()> {
+        self.writer.lock().unwrap().remove(k)
+    }
+}
+
+impl WriteModule {
+    fn set(&mut self, k: String, v: String) -> Result<()> {
+        let e = Entry::Set(k.clone(), v);
+
+        let offset = self.writer.pos as u64;
+        serde_json::to_writer(&mut self.writer, &e)?;
+        self.writer.flush()?;
+        let end = self.writer.pos as u64;
+        if let Some(old_pos) = self.map.get(&k) {
+            self.compact_size += old_pos.value().size;
+        }
+
+        self.map.insert(k, Position{
+            log_no: self.index,
+            offset,
+            size: end - offset,
+        });
+
+        // if size overflowed
+        if self.compact_size > MAX_SIZE {
+            self.compact()?;
+        }
+
+        Ok(())
+    }
+
+    fn remove(&mut self, k: String) -> Result<()> {
         let e = Entry::Remove(k.clone());
         
-        {
-            let writer = self.writer.clone();
-            let mut writer = writer.lock().unwrap();
-            serde_json::to_writer(&mut writer.writer, &e)?;
-            writer.writer.flush()?;
-        }
+        serde_json::to_writer(&mut self.writer, &e)?;
+        self.writer.flush()?;
         
-        if let None = self.map.write().unwrap().remove(&k) {
+        if let None = self.map.remove(&k) {
             Err(KvsError::NoEntryError)?
         }
 
         Ok(())
+    }
+
+    fn compact(&mut self) -> Result<()> {
+        self.index += 1;
+        self.open_new_log()?;
+        let mut offset = 0;
+        for e in self.map.iter() {
+            let len = self.reader.read_and(&e.value(), |mut f| {
+                Ok(io::copy(&mut f, &mut self.writer)?)
+            })?;
+            self.map.insert(e.key().clone(), Position {
+                log_no: self.index,
+                offset,
+                size: len
+            });
+            offset += len;
+        }
+
+        self.writer.flush()?;
+        self.delete_old_logs()?;
+
+        self.index += 1;
+        self.open_new_log()?;
+        
+        self.compact_size = 0;
+        Ok(())
+    }
+
+    fn open_new_log(&mut self) -> Result<()> {
+        let mut file_path = (*self.workdir).clone();
+        file_path.push(get_log_name(self.index));
+
+        let writer = WriteSeeker::new(OpenOptions::new()
+                    .write(true)
+                    .truncate(false)
+                    .create(true)
+                    .open(file_path.as_path())?);
+        let reader = ReadSeeker::new(OpenOptions::new()
+                    .read(true)
+                    .open(file_path.as_path())?);
+
+        self.writer = writer;
+        self.reader.readers.borrow_mut().insert(self.index, reader);
+
+        Ok(())
+    }
+
+    fn delete_old_logs(&self) -> Result<()> {
+        let logs = get_log_numbers(self.workdir.to_path_buf())?;
+        let mut delete_files = vec![];
+
+        for log in logs.iter() {
+            if *log < self.index {
+                let log_name = get_log_name(*log);
+                self.reader.readers.borrow_mut().remove(log);
+                let mut log_path= (*self.workdir).clone();
+                log_path.push(log_name);
+                delete_files.push(log_path);
+            }
+        }
+
+        for f in delete_files {
+            fs::remove_file(f.as_path())?;
+        }
+
+        (*self.reader.newest_index).store(self.index, SeqCst);
+
+        Ok(())
+    }
+}
+
+impl ReadModule {
+    fn read(&self, pos: &Position) -> Result<Option<String>> {
+        self.read_and(pos, |f| {
+            if let Entry::Set(..,value) = serde_json::from_reader(f)? {
+                Ok(Some(value))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn read_and<F, R>(&self, pos: &Position, f: F) -> Result<R>
+    where F: FnOnce(Take<&mut ReadSeeker<File>>) -> Result<R>
+    {
+        self.update_readers()?;
+        let mut readers = self.readers.borrow_mut();
+        
+        if !readers.contains_key(&pos.log_no) {
+            let mut file_path = (*self.workdir).clone();
+            file_path.push(get_log_name(pos.log_no));
+            let reader = ReadSeeker::new(OpenOptions::new()
+                .read(true)
+                .open(file_path.as_path())?);
+            readers.insert(pos.log_no, reader);
+        }
+
+        if let Some(reader) = readers.get_mut(&pos.log_no) {
+            reader.seek(SeekFrom::Start(pos.offset))?;
+            let r = reader.take(pos.size);
+            f(r)
+        } else {
+            Err(KvsError::IOError(io::Error::new(
+                io::ErrorKind::Other, 
+                format!("No reader opened for {}", pos.log_no)
+            )))?
+        }
+    }
+
+    fn update_readers(&self) -> Result<()> {
+        let mut readers = self.readers.borrow_mut();
+        while !readers.is_empty() {
+            let key = *readers.keys().next().unwrap();
+            if key < self.newest_index.load(SeqCst) {
+                readers.remove(&key);
+            } else {
+                break
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Clone for KvStore {
+    fn clone(&self) -> Self {
+        Self { 
+            workdir: Arc::clone(&self.workdir), 
+            reader:  ReadModule {
+                readers: RefCell::new(BTreeMap::new()),
+                newest_index: Arc::clone(&self.reader.newest_index),
+                workdir: Arc::clone(&self.reader.workdir),
+            }, 
+            writer: self.writer.clone(),
+            map: Arc::clone(&self.map), 
+        }
     }
 }
 
@@ -116,188 +260,94 @@ impl KvStore {
 
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
         let file_path : PathBuf = path.into();
-        let logs = KvStore::get_log_numbers(file_path.clone())?;
+        let logs = get_log_numbers(file_path.clone())?;
         
-        let mut readers = HashMap::new();
-        let mut map = BTreeMap::new();
+        let mut map = SkipMap::new();
         let index = *logs.last().unwrap_or(&1);
         for it in logs.iter() {
             let mut log_file_path = file_path.clone();
-            log_file_path.push(KvStore::get_log_name(*it));
+            log_file_path.push(get_log_name(*it));
             let mut reader = ReadSeeker::new(OpenOptions::new()
                         .read(true)
                         .open(log_file_path)?);
             
-            KvStore::init_memory_a_file(&mut map, *it, &mut reader)?;
-            readers.insert(*it, reader);
+            init_memory_a_file(&mut map, *it, &mut reader)?;
         } 
 
         let mut log_file = file_path.clone();
-        log_file.push(KvStore::get_log_name(index));
+        log_file.push(get_log_name(index));
 
         let writer = WriteSeeker::new(OpenOptions::new()
                     .write(true)
                     .truncate(false)
                     .create(true)
                     .open(current_dir().unwrap().join(log_file.clone()))?);
-        let reader = ReadSeeker::new(OpenOptions::new()
-                    .read(true)
-                    .open(current_dir().unwrap().join(log_file))?);
-        readers.insert(index, reader);
         
+        let ato_index = Arc::new(AtomicU64::new(index));
+        let workdir = Arc::new(file_path);
+        let map = Arc::new(map);
         Ok(Self {
-            map: Arc::new(RwLock::new(map)),
+            map: Arc::clone(&map),
             writer: Arc::new(Mutex::new(WriteModule {
                 writer,
                 index,
                 compact_size: 0,
+                reader: ReadModule::new(Arc::clone(&ato_index), Arc::clone(&workdir)),
+                map: Arc::clone(&map),
+                workdir: Arc::clone(&workdir),
             })),
-            reader: Arc::new(Mutex::new(ReadModule {
-                readers,
-            })),
-            workdir: Arc::new(file_path),
+            reader: ReadModule::new(Arc::clone(&ato_index), Arc::clone(&workdir)),
+            workdir: Arc::clone(&workdir),
         })
     }
+}
 
-    fn compact(&self) -> Result<()> {
-        {
-            let mut writer = self.writer.lock().unwrap();
-            writer.index += 1;
-        }
+fn init_memory_a_file<R: Read + Seek + Sync>(map: &mut SkipMap<String, Position>, log_no: u64, reader: &mut ReadSeeker<R>) -> Result<()> {
+    reader.seek(SeekFrom::Start(0))?;
 
-        self.open_new_log()?;
+    let mut offset  = 0;
+    let mut stream = serde_json::Deserializer::from_reader(reader)
+        .into_iter::<Entry>();
 
-        {
-            let mut writer = self.writer.lock().unwrap();
-            for pos in &mut self.map.write().unwrap().values_mut() {
-                if let Some(file) = self.reader.lock().unwrap().readers.get_mut(&pos.log_no) {
-                    file.seek(SeekFrom::Start(pos.offset))?;
-                    let mut reader = io::BufReader::new(file.take(pos.size));
-                    let offset = writer.writer.seek(SeekFrom::Current(0))?;
-                    io::copy(&mut reader, &mut writer.writer)?;
-                    
-                    *pos = Position {
-                        log_no: writer.index,
-                        offset,
-                        size: pos.size
-                    };
-
-                    file.seek(SeekFrom::End(0))?;
-                }
+    while let Some(e) = stream.next() {
+        let new_pow = stream.byte_offset() as u64;
+        match e? {
+            Entry::Set(k1, _) => {
+                map.insert(k1, Position {
+                    log_no, 
+                    offset,
+                    size: new_pow  - offset,
+                });
+            },
+            Entry::Remove(k1) => {
+                map.remove(&k1);
             }
         }
-        self.delete_old_logs()?;
-        {
-            let mut writer = self.writer.lock().unwrap();
-            writer.index += 1;
-        }
-        self.open_new_log()?;
-        {
-            let mut writer = self.writer.lock().unwrap();
-            writer.compact_size = 0;
-        }
-        Ok(())
+        offset = new_pow;
     }
+    Ok(())
+}
 
-    fn delete_old_logs(&self) -> Result<()> {
-        let logs = KvStore::get_log_numbers(self.workdir.to_path_buf())?;
-        let index = {
-            self.writer.lock().unwrap().index
-        };
-        let mut delete_files = vec![];
+fn get_log_numbers(file_path: PathBuf) -> Result<Vec<u64>> {     
+    let mut logs: Vec<u64> = fs::read_dir(file_path)?
+        .flat_map(|f| -> Result<_> {Ok(f?.path())})
+        .filter(|f| {f.is_file()})
+        .filter(|f|f.extension() == Some("log".as_ref()))
+        .flat_map(|path| {
+            path.file_name()
+                .and_then(|s|s.to_str())
+                .map(|s| s.trim_end_matches(".log"))
+                .map(|i| i.parse::<u64>())
+        })
+        .flatten()
+        .collect();
 
-        for log in logs.iter() {
-            if *log < index {
-                let log_name = KvStore::get_log_name(*log);
-                {
-                    self.reader.lock().unwrap().readers.remove(log);
-                }
-                let mut log_path= (*self.workdir).clone();
-                log_path.push(log_name);
-                delete_files.push(log_path);
-                
-            }
-        }
+    logs.sort_unstable();
+    Ok(logs)
+}
 
-        for f in delete_files {
-            fs::remove_file(f.as_path())?;
-        }
-
-        Ok(())
-    }
-
-    fn open_new_log(&self) -> Result<()> {
-        let mut file_path = (*self.workdir).clone();
-        {
-            let w = self.writer.lock().unwrap();
-            file_path.push(KvStore::get_log_name(w.index));
-        }
-
-        let writer = WriteSeeker::new(OpenOptions::new()
-                    .write(true)
-                    .truncate(false)
-                    .create(true)
-                    .open(file_path.as_path())?);
-        let reader = ReadSeeker::new(OpenOptions::new()
-                    .read(true)
-                    .open(file_path.as_path())?);
-
-        {
-            let mut w = self.writer.lock().unwrap();
-            w.writer = writer;
-            self.reader.lock().unwrap().readers.insert(w.index, reader);
-        }
-
-        Ok(())
-    }
-
-    fn get_log_name(id: u64) -> String {
-        format!("{}.log", id)
-    }
-
-    fn init_memory_a_file<R: Read + Seek + Sync>(map: &mut BTreeMap<String, Position>, log_no: u64, reader: &mut ReadSeeker<R>) -> Result<()> {
-        reader.seek(SeekFrom::Start(0))?;
-
-        let mut offset  = 0;
-        let mut stream = serde_json::Deserializer::from_reader(reader)
-            .into_iter::<Entry>();
-
-        while let Some(e) = stream.next() {
-            let new_pow = stream.byte_offset() as u64;
-            match e? {
-                Entry::Set(k1, _) => {
-                    map.insert(k1, Position {
-                        log_no, 
-                        offset,
-                        size: new_pow  - offset,
-                    });
-                },
-                Entry::Remove(k1) => {
-                    map.remove(&k1);
-                }
-            }
-            offset = new_pow;
-        }
-        Ok(())
-    }
-
-    fn get_log_numbers(file_path: PathBuf) -> Result<Vec<u64>> {     
-        let mut logs: Vec<u64> = fs::read_dir(file_path)?
-            .flat_map(|f| -> Result<_> {Ok(f?.path())})
-            .filter(|f| {f.is_file()})
-            .filter(|f|f.extension() == Some("log".as_ref()))
-            .flat_map(|path| {
-                path.file_name()
-                    .and_then(|s|s.to_str())
-                    .map(|s| s.trim_end_matches(".log"))
-                    .map(|i| i.parse::<u64>())
-            })
-            .flatten()
-            .collect();
-
-        logs.sort_unstable();
-        Ok(logs)
-    }
+fn get_log_name(id: u64) -> String {
+    format!("{}.log", id)
 }
 
 struct ReadSeeker <R: Read + Seek> {
