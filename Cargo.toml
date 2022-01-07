@@ -27,6 +27,12 @@ panic-control = "0.1.4"
 crossbeam-utils = "0.8.5"
 rayon = "1.5.1"
 crossbeam-skiplist = { git = "https://github.com/crossbeam-rs/crossbeam.git", branch = "master" }
+async-std = "1.10.0"
+tokio-serde = { version = "0.8.0", features = ["json"]}
+tokio-util = { version = "0.6.9", features = ["codec"]}
+tokio = { version = "1.15.0", features = ["full"]}
+tokio-serde-json = "0.3.0"
+# futures = { version = "0.3", features = ["futures_api"]}
 
 [dev-dependencies]
 criterion = "0.3"

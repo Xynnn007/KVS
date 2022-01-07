@@ -1,31 +1,50 @@
-use std::io;
-
-use serde::{Serialize, Deserialize};
+use std::io::{Write, Read};
 
 use crate::err::*;
 
+use serde::{Serialize, Deserialize};
+use tokio::io::{ AsyncWrite, AsyncWriteExt};
+use tokio::io::{ AsyncRead, AsyncReadExt};
+
 #[derive(Serialize, Deserialize)]
-pub enum Operation {
-    Set(String, String, u64),
-    Get(String, u64),
-    Remove(String, u64),
-    Ok(Option<String>, u64),
-    Error(u64),
+pub enum Request {
+    Set(String, String),
+    Get(String),
+    Remove(String),
 }
 
-impl Operation {
-    pub fn to_writer<W>(&self, w: &mut W) -> Result<()> 
-    where W: io::Write
-    {
-        serde_json::to_writer(w, self)?;
-        
+#[derive(Serialize, Deserialize)]
+pub enum Response {
+    Get(Option<String>), 
+    Ok,
+    Error(String),
+}
+
+impl Request {
+    pub async fn write(&self, mut w: impl AsyncWrite + Unpin + Send) -> Result<()> {
+        let data = serde_json::to_string(self)?;
+        w.write(data.as_bytes()).await?;
+        w.flush().await?;
         Ok(())
     }
 
-    pub fn get_operation_from_reader<R>(r: &mut R) -> Result<Self>
-    where R: io::Read
-    {
+    pub fn read_from(r: impl Read) -> Result<Self> {
         let mut de = serde_json::Deserializer::from_reader(r);
-        Ok(Operation::deserialize(&mut de)?)
+        Ok(Request::deserialize(&mut de)?)
+    }
+}
+
+impl Response {
+    pub async fn read_from(mut r: impl AsyncRead + Unpin + Send) -> Result<Self> {
+        let mut data = String::new();
+        r.read_to_string(&mut data).await?;
+        Ok(serde_json::from_str(&data)?)
+    }
+
+    pub fn write(&self, mut w: impl Write) -> Result<()> {
+        let data = serde_json::to_string(self)?;
+        w.write(data.as_bytes())?;
+        w.flush()?;
+        Ok(())
     }
 }

@@ -8,7 +8,6 @@ use crate::thread_pool::ThreadPool;
 
 use std::io::BufReader;
 use std::io::BufWriter;
-use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::net::TcpListener;
 
@@ -53,60 +52,47 @@ impl<E: KvsEngine, T: ThreadPool> KvsServer<E, T> {
 fn handle_client<E: KvsEngine>(engine: E, stream: TcpStream) -> Result<()> {
     let mut reader = BufReader::new(&stream);
     let mut writer = BufWriter::new(&stream);
-    match Operation::get_operation_from_reader(&mut reader)? {
-        Operation::Set(k, v, index) => {
+    match Request::read_from(&mut reader)? {
+        Request::Set(k, v) => {
             match engine.set(k, v) {
                 Err(e) => {
                     error!("{}", e);
-                    Operation::Error(index).to_writer(&mut writer)?;
-                    writer.flush()?;
+                    Response::Error(e.to_string()).write(&mut writer)?;
                 }
                 _ => {
-                    Operation::Ok(Some(String::new()), index).to_writer(&mut writer)?;
-                    writer.flush()?;
+                    Response::Ok.write(&mut writer)?;
                 }
             }
         },
-        Operation::Get(k, index) => {
+        Request::Get(k) => {
             match engine.get(k) {
                 Err(e) => {
                     error!("{}", e);
-                    Operation::Error(index).to_writer(&mut writer)?;
-                    writer.flush()?;
+                    Response::Error(e.to_string()).write(&mut writer)?;
                 }
                 Ok(value) => {
-                    Operation::Ok(value, index).to_writer(&mut writer)?;
-                    writer.flush()?;
+                    Response::Get(value).write(&mut writer)?;
                 }
             }
         },
-        Operation::Remove(k, index) => {
+        Request::Remove(k) => {
             match engine.remove(k) {
                 Err(e) => {
+                    Response::Error(e.to_string()).write(&mut writer)?;
                     match e {
                         KvsError::NoEntryError => {
-                            Operation::Error(u64::MAX).to_writer(&mut writer)?;
                             warn!("{}", e);
                         },
                         _ => {
-                            Operation::Error(index).to_writer(&mut writer)?;
                             error!("{}", e);
                         },
                     }
-                    writer.flush()?;
                 }
                 _ => {
-                    Operation::Ok(Some(String::new()), index).to_writer(&mut writer)?;
-                    writer.flush()?;
+                    Response::Ok.write(&mut writer)?;
                 }
             }
         },
-        _ => {
-            error!("get a wrong type operation");
-            Operation::Error(0).to_writer(&mut writer)?;
-            writer.flush()?;
-            Err(KvsError::OperationError)?
-        }
     }
     Ok(())
 }

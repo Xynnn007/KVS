@@ -31,6 +31,9 @@ pub enum KvsError {
 
     #[fail(display = "Addr Parse Error, {}", _0)]
     AddrParseError(AddrParseError),
+
+    #[fail(display = "{}", _0)]
+    StringError(String),
 }
 
 impl From<serde_json::Error> for KvsError {

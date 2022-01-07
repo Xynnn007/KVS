@@ -10,7 +10,8 @@ use kvs::client::*;
 use kvs::err::*;
 use log::LevelFilter;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::builder()
         .filter_level(LevelFilter::Info)
         .init();
@@ -78,26 +79,28 @@ fn main() -> Result<()> {
                                .default_value("127.0.0.1:4000"))
         )
         .get_matches();
-    
+
     match matches.subcommand() {
         ("set", Some(_matches)) => {
-            let address = _matches.value_of("server address").unwrap();
+            let address = _matches.value_of("server address")
+                .unwrap()
+                .parse()?;
             let k = String::from_str(_matches.values_of("key").unwrap().last().unwrap()).unwrap();
             let v = String::from_str(_matches.values_of("value").unwrap().last().unwrap()).unwrap();
 
-            let client_config = KvsClientConfig{ address };
-            let mut kv = KvsClient::new(&client_config)?;
-            kv.set(k, v)?;
+            let mut kv = KvsClient::new(address).await?;
+            kv.set(k, v).await?;
         },
         ("rm", Some(_matches)) => {
-            let address = _matches.value_of("server address").unwrap();
+            let address = _matches.value_of("server address")
+                .unwrap()
+                .parse()?;
             let k = String::from_str(_matches.values_of("key").unwrap().last().unwrap()).unwrap();
 
-            let client_config = KvsClientConfig{ address };
-            let mut kv = KvsClient::new(&client_config)?;
+            let mut kv = KvsClient::new(address).await?;
 
-            match kv.remove(k) {
-                Ok(_) => {},
+            match kv.remove(k).await {
+                Ok(()) => {},
                 Err(e) => match e {
                     KvsError::NoEntryError => {
                         eprintln!("Key not found");
@@ -108,13 +111,13 @@ fn main() -> Result<()> {
             };
         },
         ("get", Some(_matches)) => {
-            let address = _matches.value_of("server address").unwrap();
+            let address = _matches.value_of("server address")
+                .unwrap()
+                .parse()?;
             let k = String::from_str(_matches.values_of("key").unwrap().last().unwrap()).unwrap();
+            let mut kv = KvsClient::new(address).await?;
 
-            let client_config = KvsClientConfig{ address };
-            let mut kv = KvsClient::new(&client_config)?;
-
-            let v = kv.get(k)?;
+            let v = kv.get(k).await?;
             match v {
                 Some(v) => println!("{}", v),
                 None => println!("Key not found")

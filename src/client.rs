@@ -1,97 +1,60 @@
-use std::io::BufReader;
-use std::io::BufWriter;
-use std::io::Write;
-use std::net::TcpStream;
+use std::net::SocketAddr;
+
+use tokio::io::{BufWriter, BufReader};
+use tokio::io::{WriteHalf, ReadHalf};
+use tokio::net::TcpStream;
 
 use crate::err::*;
 use crate::protocol::*;
 
 pub struct KvsClient {
-    stream: TcpStream,
-    index: u64,
-}
-
-pub struct KvsClientConfig<'a> {
-    pub address: &'a str,
+    writer : BufWriter<WriteHalf<TcpStream>>,
+    reader : BufReader<ReadHalf<TcpStream>>,
 }
 
 impl KvsClient {
-    pub fn new(config: &KvsClientConfig) -> Result<Self> {
-        let stream = TcpStream::connect(config.address)?;
-        Ok (
-            Self {
-                stream,
-                index: 0,
-            }
-        )
+    pub async fn new(address: SocketAddr) -> Result<Self> {
+        let stream = TcpStream::connect(address).await?;
+        let (reader, writer) = tokio::io::split(stream);
+        let reader = BufReader::new(reader);
+        let writer = BufWriter::new(writer);
+        Ok( Self {
+            writer,
+            reader
+        })
     }
 
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let op = Operation::Set(key, value, self.index);
-        let mut writer = BufWriter::new(&self.stream);
-        let mut reader = BufReader::new(&self.stream);
-        op.to_writer(&mut writer)?;
-        writer.flush()?;
-
-        self.index += 1;
-        
-        match Operation::get_operation_from_reader(&mut reader)? {
-            Operation::Ok(_, id) => {
-                if id != self.index - 1{
-                    Err(KvsError::OperationError)?
-                }
+    pub async fn set(&mut self, key: String, value: String) -> Result<()> {
+        let op = Request::Set(key, value);
+        op.write(&mut self.writer).await?;
+        match Response::read_from(&mut self.reader).await? {
+            Response::Ok => {
                 Ok(())
             },
-            Operation::Error(_) => {
-                Err(KvsError::OperationError)?
-            },
-            _ => Err(KvsError::OperationError)?
+            Response::Error(e) => Err(KvsError::StringError(e)),
+            _ => Err(KvsError::StringError("Illegel response".to_string())),
         }
     }
 
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        let op = Operation::Get(key, self.index);
-        let mut writer = BufWriter::new(&self.stream);
-        let mut reader = BufReader::new(&self.stream);
-        op.to_writer(&mut writer)?;
-        writer.flush()?;
+    pub async fn get(&mut self, key: String) -> Result<Option<String>> {
+        let op = Request::Get(key);
+        op.write(&mut self.writer).await?;
 
-        self.index += 1;
-        
-        match Operation::get_operation_from_reader(&mut reader)? {
-            Operation::Ok(value, id) => {
-                if id != self.index - 1{
-                    Err(KvsError::OperationError)?
-                }
-                Ok(value)
-            },
-            Operation::Error( _) => {
-                Err(KvsError::OperationError)?
-            },
-            _ => Err(KvsError::OperationError)?
+        match Response::read_from(&mut self.reader).await? {
+            Response::Get(v) => Ok(v),
+            Response::Error(e) => Err(KvsError::StringError(e)),
+            _ => Err(KvsError::StringError("Illegel response".to_string())),
         }
     }
 
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        let op = Operation::Remove(key, self.index);
-        let mut writer = BufWriter::new(&self.stream);
-        let mut reader = BufReader::new(&self.stream);
-        op.to_writer(&mut writer)?;
-        writer.flush()?;
+    pub async fn remove(&mut self, key: String) -> Result<()> {
+        let op = Request::Remove(key);
+        op.write(&mut self.writer).await?;
 
-        self.index += 1;
-        
-        match Operation::get_operation_from_reader(&mut reader)? {
-            Operation::Ok(_, id) => {
-                if id != self.index - 1{
-                    Err(KvsError::OperationError)?
-                }
-                Ok(())
-            },
-            Operation::Error(u64::MAX) => {
-                Err(KvsError::NoEntryError)?
-            },
-            _ => Err(KvsError::OperationError)?
+        match Response::read_from(&mut self.reader).await? {
+            Response::Ok => Ok(()),
+            Response::Error(e) => Err(KvsError::StringError(e)),
+            _ => Err(KvsError::StringError("Illegel response".to_string())),
         }
     }
 }
